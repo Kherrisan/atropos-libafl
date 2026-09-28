@@ -1,17 +1,12 @@
-use std::{
-    env,
-    path::{Path, PathBuf},
-    thread,
-    time::Duration,
-};
+use std::{env, path::PathBuf, thread, time::Duration};
 
 use libafl::{
-    Error,
     corpus::CorpusId,
     executors::ExitKind,
     fuzzer::{Evaluator, ExecutesInput},
     mutators::Mutator,
     state::HasRand,
+    Error,
 };
 use libafl_bolts::rands::Rand;
 use serde::Deserialize;
@@ -36,24 +31,45 @@ pub struct LlmConfig {
 impl LlmConfig {
     pub fn from_env() -> Self {
         let provider = env::var("ATROPOS_LLM_PROVIDER").unwrap_or_else(|_| "codex".to_string());
-        let auth_file = env::var("ATROPOS_LLM_AUTH_FILE").ok().map(PathBuf::from).or_else(|| {
-            let home = env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
-            if provider == "claude" {
-                Some(PathBuf::from(home).join(".claude"))
-            } else {
-                Some(PathBuf::from(home).join(".codex/auth.json"))
-            }
-        });
+        let auth_file = env::var("ATROPOS_LLM_AUTH_FILE")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                env::var_os("HOME").map(|home| {
+                    let home = PathBuf::from(home);
+                    if provider == "claude" {
+                        home.join(".claude")
+                    } else {
+                        home.join(".codex/auth.json")
+                    }
+                })
+            });
         Self {
             provider,
             auth_file,
-            base_url: env::var("ATROPOS_LLM_BASE_URL").ok().filter(|value| !value.is_empty()),
-            api_key: env::var("ATROPOS_LLM_API_KEY").ok().filter(|value| !value.is_empty()),
-            model: env::var("ATROPOS_LLM_MODEL").ok().filter(|value| !value.is_empty()),
-            stall: env::var("ATROPOS_LLM_STALL").ok().and_then(|text| text.parse().ok()).unwrap_or(50),
-            probability: env::var("ATROPOS_LLM_PROB").ok().and_then(|text| text.parse().ok()).unwrap_or(0.8),
+            base_url: env::var("ATROPOS_LLM_BASE_URL")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            api_key: env::var("ATROPOS_LLM_API_KEY")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            model: env::var("ATROPOS_LLM_MODEL")
+                .ok()
+                .filter(|value| !value.is_empty()),
+            stall: env::var("ATROPOS_LLM_STALL")
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(50),
+            probability: env::var("ATROPOS_LLM_PROB")
+                .ok()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(0.8),
             timeout: Duration::from_secs(
-                env::var("ATROPOS_LLM_TIMEOUT").ok().and_then(|text| text.parse().ok()).unwrap_or(180),
+                env::var("ATROPOS_LLM_TIMEOUT")
+                    .ok()
+                    .and_then(|text| text.parse().ok())
+                    .unwrap_or(180),
             ),
         }
     }
@@ -91,7 +107,8 @@ impl LlmAgent {
     }
 
     pub fn should_fire<S: HasRand>(&self, state: &mut S) -> bool {
-        self.execs_since_novel >= self.config.stall && state.rand_mut().coinflip(self.config.probability)
+        self.execs_since_novel >= self.config.stall
+            && state.rand_mut().coinflip(self.config.probability)
     }
 
     /// Run the current input, dump source lines, ask the agent for a new input, then run that input.
@@ -114,10 +131,7 @@ impl LlmAgent {
         let _exit: ExitKind = fuzzer.execute_input(state, executor, manager, &traced)?;
         let report = coverage_report::write_report(input, &self.queue)
             .map_err(|err| Error::unknown(format!("coverage report: {err}")))?;
-        eprintln!(
-            "llm coverage hits written, new lines {}",
-            report.new_lines
-        );
+        eprintln!("llm coverage hits written, new lines {}", report.new_lines);
 
         match self.ask(&report, input) {
             Ok(mut proposed) => {
@@ -175,7 +189,7 @@ impl LlmAgent {
                     .block_task()
                     .await?;
                 connection
-                    .build_session(Path::new("/home/user/wordpress"))
+                    .build_session(&crate::paths::wordpress_root())
                     .block_task()
                     .run_until(async |mut session| {
                         session.send_prompt(prompt)?;
@@ -244,11 +258,12 @@ impl LlmAgent {
 
 fn render_prompt(report: &CoverageReport, current: &HttpInput) -> String {
     let current_json = serde_json::to_string_pretty(current).unwrap_or_else(|_| "{}".to_string());
+    let wordpress_root = crate::paths::wordpress_root();
     format!(
         r#"你是覆盖导向的 HTTP 输入变异器。不要修改任何文件，不要执行写入。只在最终回复里打印一个 JSON 对象。
 
 当前输入没有再走出新的语料。请阅读这次执行命中的 PHP 源码，把输入改成更可能进入尚未命中分支的请求。
-源码根目录是 /home/user/wordpress。入口是 index.php，REST 由 WordPress 的 wp() 分发。
+源码根目录是 {wordpress_root}。入口是 index.php，REST 由 WordPress 的 wp() 分发。
 若 pin_route 为 true，保持 method 和 path 不变，只改 query、headers、cookies 或 JSON body。
 
 本次命中行：{hits}
@@ -267,6 +282,7 @@ query、headers、cookies 是 [字符串, 字节数组] 的列表。body 是 JSO
         queue = report.queue_path.display(),
         current_file = report.current_path.display(),
         current_json = current_json,
+        wordpress_root = wordpress_root.display(),
     )
 }
 
@@ -295,7 +311,9 @@ fn permission_response(
     RequestPermissionResponse::new(RequestPermissionOutcome::Cancelled)
 }
 
-fn sleep_timeout(duration: Duration) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+fn sleep_timeout(
+    duration: Duration,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
     let (sender, receiver) = futures::channel::oneshot::channel();
     thread::spawn(move || {
         thread::sleep(duration);

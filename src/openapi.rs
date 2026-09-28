@@ -54,8 +54,12 @@ pub fn load_operations(path: &str) -> Result<Vec<Operation>, String> {
         return Ok(operations);
     };
     for (template, item) in paths {
-        let Some(template) = template.as_str() else { continue };
-        let Some(item) = item.as_mapping() else { continue };
+        let Some(template) = template.as_str() else {
+            continue;
+        };
+        let Some(item) = item.as_mapping() else {
+            continue;
+        };
         for method in ["get", "post", "put", "patch", "delete", "head", "options"] {
             let Some(operation) = item.get(Value::String(method.to_string())) else {
                 continue;
@@ -124,7 +128,10 @@ fn resolve_seen(schema: &Value, root: &Value, seen: &mut Vec<String>) -> Value {
                 }
             }
         }
-        merged.insert(Value::String("properties".into()), Value::Mapping(properties));
+        merged.insert(
+            Value::String("properties".into()),
+            Value::Mapping(properties),
+        );
         merged.insert(Value::String("required".into()), Value::Sequence(required));
         return Value::Mapping(merged);
     }
@@ -137,9 +144,11 @@ fn schema_from(schema: &Value, root: &Value) -> Schema {
         return Schema::Enum(
             items
                 .iter()
-                .filter_map(|item| item.as_str().map(str::to_string).or_else(|| {
-                    item.as_i64().map(|number| number.to_string())
-                }))
+                .filter_map(|item| {
+                    item.as_str()
+                        .map(str::to_string)
+                        .or_else(|| item.as_i64().map(|number| number.to_string()))
+                })
                 .collect(),
         );
     }
@@ -160,7 +169,10 @@ fn schema_from(schema: &Value, root: &Value) -> Schema {
             Schema::Object(props)
         }
         Some("array") => {
-            let item = schema.get("items").cloned().unwrap_or(Value::String("string".into()));
+            let item = schema
+                .get("items")
+                .cloned()
+                .unwrap_or(Value::String("string".into()));
             Schema::Array(Box::new(schema_from(&item, root)))
         }
         Some("boolean") => Schema::Bool,
@@ -172,7 +184,9 @@ fn schema_from(schema: &Value, root: &Value) -> Schema {
 
 fn example_json(schema: &Schema) -> JsonValue {
     match schema {
-        Schema::Enum(items) => JsonValue::String(items.first().cloned().unwrap_or_default().into_bytes()),
+        Schema::Enum(items) => {
+            JsonValue::String(items.first().cloned().unwrap_or_default().into_bytes())
+        }
         Schema::Object(fields) => JsonValue::Object(
             fields
                 .iter()

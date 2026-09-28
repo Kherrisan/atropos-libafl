@@ -54,19 +54,31 @@ fn parse(bytes: &[u8]) -> RedqueenDict {
         let kind = bytes[cursor];
         cursor += 1;
         if kind == STRING || kind == ARRAY_KEY {
-            let Some(len) = read_i16(bytes, &mut cursor) else { break };
+            let Some(len) = read_i16(bytes, &mut cursor) else {
+                break;
+            };
             let len = len.max(0) as usize;
-            let Some(content) = read_bytes(bytes, &mut cursor, len) else { break };
+            let Some(content) = read_bytes(bytes, &mut cursor, len) else {
+                break;
+            };
             let owned = content.to_vec();
             dict.strings.push(owned.clone());
             if kind == ARRAY_KEY {
                 dict.keys.push(owned);
             }
         } else if kind == UNMATCHED || kind == PREG {
-            let Some(len1) = read_i16(bytes, &mut cursor) else { break };
-            let Some(left) = read_bytes(bytes, &mut cursor, len1.max(0) as usize) else { break };
-            let Some(len2) = read_i16(bytes, &mut cursor) else { break };
-            let Some(right) = read_bytes(bytes, &mut cursor, len2.max(0) as usize) else { break };
+            let Some(len1) = read_i16(bytes, &mut cursor) else {
+                break;
+            };
+            let Some(left) = read_bytes(bytes, &mut cursor, len1.max(0) as usize) else {
+                break;
+            };
+            let Some(len2) = read_i16(bytes, &mut cursor) else {
+                break;
+            };
+            let Some(right) = read_bytes(bytes, &mut cursor, len2.max(0) as usize) else {
+                break;
+            };
             let left = left.to_vec();
             let right = right.to_vec();
             dict.strings.push(left.clone());

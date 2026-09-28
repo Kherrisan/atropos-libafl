@@ -1,0 +1,119 @@
+# Atropos LibAFL Nyx front end
+
+This repository implements the Atropos host fuzzer with Rust and LibAFL. It uses LibAFL's `NyxExecutor` as its only execution path: each HTTP input is sent to a Nyx VM, where the original Atropos guest agent forwards it to PHP over FastCGI. Coverage comes from the guest's patched PCOV extension through Nyx's shared bitmap. PHP crashes and Atropos bug-oracle reports are saved in the solutions corpus.
+
+The guest protocol, agent, PHP 7.4 source, and PCOV source are taken from the adjacent [`atropos-legacy`](https://github.com/CISPA-SysSec/atropos-legacy) checkout. The legacy checkout is used as an input and is not modified. The original agent runs `php-cgi` as a FastCGI service (`php-cgi -b /tmp/php.sock`); it does not run PHP-FPM in the request path.
+
+## Host requirements
+
+- Ubuntu 24.04 x86_64 with KVM and a CPU that supports virtualization.
+- Nix, Rust stable via rustup, and an active systemd user manager.
+- A sibling `atropos-legacy` checkout with its patched PHP and PCOV sources.
+- A WordPress source tree, defaulting to `../wordpress`.
+- Network access while building and provisioning the guest.
+
+The scripts use a Nixpkgs 22.11 build shell for PHP 7.4's older dependencies, MariaDB, QEMU build tools, and cloud-image utilities. PHP, PCOV, MariaDB, the fuzzer, and guest image are built or run directly on the host; Docker is not used.
+
+Install Rust if needed:
+
+```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+. "$HOME/.cargo/env"
+```
+
+If either checkout is elsewhere, set these variables for the relevant commands:
+
+```sh
+export ATROPOS_LEGACY_ROOT=/path/to/atropos-legacy
+export ATROPOS_WORDPRESS_ROOT=/path/to/wordpress
+```
+
+## Build the fuzzer and guest runtime
+
+Build LibAFL with the Nyx profile. This checks out QEMU-Nyx and Packer and builds QEMU-Nyx as a static, non-LTO binary. The local `libafl_nyx` compatibility patch skips Packer's legacy 32-bit loader initramfs, which is only needed for kernel boot mode; this frontend boots a full Ubuntu disk image instead:
+
+```sh
+scripts/build-nyx-fuzzer.sh
+```
+
+Build PHP 7.4 `php-cgi`, the original Nyx-aware PCOV, and the Nim guest agent directly on the host. Sources are copied to temporary build directories; the original legacy checkout stays unchanged. The PHP CLI is installed under `~/.local/opt/atropos-libafl-nyx-php`, while guest files are kept under `~/.local/share/atropos-libafl/nyx/guest`:
+
+```sh
+scripts/build-nyx-php.sh
+```
+
+The PHP build uses the legacy tree's `php-7.4-patched` and `pcov-patched` source directories. It compiles the CGI SAPI and WordPress extensions; the guest runs `php-cgi`, not FPM.
+If PHP and PCOV have already built but the Nim guest-agent step needs retrying, run `ATROPOS_NYX_REUSE_PHP=1 scripts/build-nyx-php.sh`.
+
+## Prepare the WordPress database
+
+Initialize the per-user MariaDB service and WordPress tables on the host. This creates local credentials in `~/.config/atropos-libafl/wordpress-db.env` and writes a local `wp-config.php` into the WordPress tree if one is not already present:
+
+```sh
+scripts/setup-wordpress.sh
+```
+
+The service listens on `127.0.0.1:33060`. Its database is dumped into the local Nyx guest bundle by the next step; no database or credential file is added to this Git checkout.
+
+## Enable KVM's Nyx backdoor
+
+This Nyx mode uses the generic KVM VMware backdoor and compile-time PCOV instrumentation. It does not require a fixed KVM-Nyx kernel or Intel PT. Enable the KVM module parameter once:
+
+```sh
+sudo scripts/enable-kvm-nyx.sh
+```
+
+The script writes `/etc/modprobe.d/atropos-nyx.conf`, reloads the KVM modules with `enable_vmware_backdoor=Y`, and adds the current user to the `kvm` group if needed. If it adds the group membership, log out and back in before continuing. Reloading KVM will interrupt VMs using the module, so stop those first.
+
+## Create the Nyx guest and snapshot
+
+Package the local WordPress tree and database, then create a checksummed Ubuntu 24.04 cloud-image guest and install MariaDB and the Atropos runtime:
+
+```sh
+scripts/package-nyx-guest.sh
+scripts/create-nyx-vm.sh
+```
+
+`create-nyx-vm.sh` uses QEMU-Nyx under TCG, `cloud-init`, and a temporary user-mode network connection to provision the guest. This first boot does not require KVM. It defers starting MariaDB because TCG can corrupt its InnoDB initialization; on the first KVM-Nyx boot, guest services initialize MariaDB, import the WordPress database, start the PHP guest agent, and create the pre-snapshot. The pre-snapshot service detects the Nyx CPU, disables itself in the snapshot state, and issues `HYPERCALL_KAFL_LOCK`. The script writes LibAFL's `config.ron` and `default_config.ron` after the snapshot is available.
+
+Large images, snapshots, and the local database bundle stay under `~/.local/share/atropos-libafl/nyx` by default. To use another location, set `ATROPOS_NYX_DATA_DIR`; `ATROPOS_NYX_SHARE`, `ATROPOS_NYX_WORKDIR`, `ATROPOS_NYX_VM_DIR`, `ATROPOS_NYX_VM_IMAGE`, `ATROPOS_NYX_PRESNAPSHOT`, and `ATROPOS_NYX_QEMU` can override individual paths. These local files contain the WordPress database and its credentials and are created with user-only permissions.
+
+If provisioning is interrupted, rerun `scripts/create-nyx-vm.sh`. It resumes from the local image and does not overwrite an existing VM disk or pre-snapshot. To rebuild either artifact, remove that specific local artifact and its matching `cloud-init-complete` or `preimage-complete` marker first.
+
+## Run
+
+```sh
+ATROPOS_NYX_ITERS=1000 scripts/run-fuzzer.sh
+```
+
+The Rust binary is `target/nyx/atropos-libafl`. At startup it checks for `config.ron`, loads the VM image and pre-snapshot through LibAFL Nyx, adds OpenAPI-derived seeds (or the built-in WordPress batch seed), then fuzzes through `NyxExecutor`.
+
+Useful environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ATROPOS_NYX_SHARE` | `~/.local/share/atropos-libafl/nyx/share` | Nyx config and snapshot references |
+| `ATROPOS_NYX_WORKDIR` | `~/.local/share/atropos-libafl/nyx/workdir` | QEMU-Nyx work and guest dumps |
+| `ATROPOS_NYX_CPU` | `0` | Nyx worker ID |
+| `ATROPOS_NYX_TIMEOUT_SECS` | `2` | Per-input execution timeout |
+| `ATROPOS_NYX_ITERS` | unlimited | Stop after this many fuzz iterations |
+| `ATROPOS_OUTPUT_DIR` | this checkout | Corpus and solution output directory |
+| `ATROPOS_OPENAPI` | unset | OpenAPI YAML used to seed requests |
+
+The corpus and saved crashes/oracle hits are written to `nyx-corpus/` and `nyx-solutions/` under `ATROPOS_OUTPUT_DIR`. The optional LLM stage retains the existing `ATROPOS_LLM_*` configuration. It can request a guest PCOV line dump; ordinary fuzzing coverage is read directly from Nyx's bitmap observer.
+
+Set `ATROPOS_OPENAPI=/path/to/openapi.yaml` to create seeds from an OpenAPI document. Without it, the fuzzer uses the built-in WordPress batch seed. The LLM stage runs after 50 executions without a new corpus input, with an 80% chance per eligible execution. It uses Node.js/npm through `npx`; the default `codex` provider expects `~/.codex/auth.json`, and `ATROPOS_LLM_PROVIDER=claude` uses `~/.claude`. Configure `ATROPOS_LLM_AUTH_FILE`, `ATROPOS_LLM_API_KEY`, `ATROPOS_LLM_BASE_URL`, `ATROPOS_LLM_MODEL`, `ATROPOS_LLM_STALL`, `ATROPOS_LLM_PROB`, or `ATROPOS_LLM_TIMEOUT` to override those defaults. Set `ATROPOS_SCHEMA_VIOLATION_RATE` to change the mutator's default 10% schema-violation rate.
+
+For a short smoke run after building the guest:
+
+```sh
+ATROPOS_NYX_ITERS=20 ATROPOS_OUTPUT_DIR="$PWD" scripts/run-fuzzer.sh
+```
+
+## Troubleshooting
+
+- **Missing `config.ron`, disk image, or snapshot:** run the corresponding build/package step above. `scripts/prepare-nyx-share.sh` validates the VM artifacts and writes the LibAFL Nyx configuration.
+- **`enable_vmware_backdoor` is `N`:** run `sudo scripts/enable-kvm-nyx.sh`; verify `/sys/module/kvm/parameters/enable_vmware_backdoor` prints `Y` and the current user can access `/dev/kvm`.
+- **Nyx QEMU cannot start:** check `/dev/kvm`, the KVM module parameter, and the paths in `~/.local/share/atropos-libafl/nyx/share/default_config.ron`.
+- **Guest provision timeout:** inspect `~/.local/share/atropos-libafl/nyx/vm/preimage-serial.log` for snapshot boot failures and the QEMU serial output from cloud-init provisioning.
+- **Change the WordPress source or local database:** rerun `scripts/package-nyx-guest.sh`, then rebuild the local VM disk and its pre-snapshot as described above.

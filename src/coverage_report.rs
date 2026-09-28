@@ -7,9 +7,6 @@ use std::{
 
 use crate::input::HttpInput;
 
-const REPORT_DIR: &str = "/home/user/atropos-libafl/llm";
-const DUMP_PATH: &str = "/dev/shm/atropos/coverage_0";
-
 pub struct CoverageReport {
     pub hits_path: PathBuf,
     pub seen_path: PathBuf,
@@ -19,15 +16,19 @@ pub struct CoverageReport {
 }
 
 pub fn write_report(current: &HttpInput, queue: &[String]) -> Result<CoverageReport, String> {
-    fs::create_dir_all(REPORT_DIR).map_err(|err| err.to_string())?;
-    let hits = read_lines(DUMP_PATH);
-    let hits_path = PathBuf::from(REPORT_DIR).join("hits.txt");
-    let seen_path = PathBuf::from(REPORT_DIR).join("seen_lines.txt");
-    let queue_path = PathBuf::from(REPORT_DIR).join("queue.json");
-    let current_path = PathBuf::from(REPORT_DIR).join("current.json");
+    let report_dir = crate::paths::output_dir().join("llm");
+    fs::create_dir_all(&report_dir).map_err(|err| err.to_string())?;
+    let dump_path = crate::paths::nyx_workdir_dir()
+        .join("dump")
+        .join(format!("coverage_{}", crate::paths::nyx_cpu_id()));
+    let hits = read_lines(dump_path);
+    let hits_path = report_dir.join("hits.txt");
+    let seen_path = report_dir.join("seen_lines.txt");
+    let queue_path = report_dir.join("queue.json");
+    let current_path = report_dir.join("current.json");
 
     write_lines(&hits_path, &hits)?;
-    let seen = read_lines(seen_path.to_str().unwrap_or(""));
+    let seen = read_lines(&seen_path);
     let mut merged: BTreeSet<String> = seen.into_iter().collect();
     let before = merged.len();
     merged.extend(hits.iter().cloned());

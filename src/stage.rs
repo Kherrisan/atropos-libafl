@@ -1,15 +1,15 @@
 use std::borrow::Cow;
 use std::marker::PhantomData;
 
+use libafl::state::HasRand;
 use libafl::{
-    Error,
     fuzzer::Evaluator,
     inputs::Input,
     mutators::{MutationResult, Mutator},
     stages::{Restartable, Stage},
     state::HasCurrentTestcase,
+    Error,
 };
-use libafl::state::HasRand;
 use libafl_bolts::Named;
 
 use crate::{input::HttpInput, llm::LlmAgent, mutate::AtroposMutator};
@@ -67,9 +67,14 @@ where
                 "llm agent: {} executions without a new corpus entry",
                 self.llm_stall()
             );
-            return self
-                .llm
-                .mutate_and_run(fuzzer, executor, state, manager, &mut self.havoc, &mut input);
+            return self.llm.mutate_and_run(
+                fuzzer,
+                executor,
+                state,
+                manager,
+                &mut self.havoc,
+                &mut input,
+            );
         }
 
         let mutated = self.havoc.mutate(state, &mut input)?;

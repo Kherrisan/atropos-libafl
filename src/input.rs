@@ -1,4 +1,5 @@
-use libafl::inputs::Input;
+use libafl::inputs::{HasTargetBytes, Input};
+use libafl_bolts::ownedref::OwnedSlice;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
@@ -155,7 +156,9 @@ impl JsonValue {
 
 fn is_json_number(text: &str) -> bool {
     !text.is_empty()
-        && text.bytes().all(|byte| byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E'))
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'-' | b'+' | b'.' | b'e' | b'E'))
         && text.parse::<f64>().is_ok()
 }
 
@@ -193,6 +196,12 @@ pub struct HttpInput {
 }
 
 impl Input for HttpInput {}
+
+impl HasTargetBytes for HttpInput {
+    fn target_bytes(&self) -> OwnedSlice<'_, u8> {
+        OwnedSlice::from(self.nyx_payload())
+    }
+}
 
 impl HttpInput {
     pub fn batch_seed() -> Self {
@@ -254,6 +263,81 @@ impl HttpInput {
             .map(|(key, value)| format!("{key}={}", lossy(value)))
             .collect::<Vec<_>>()
             .join("; ")
+    }
+
+    fn nyx_payload(&self) -> Vec<u8> {
+        let body = self.body_bytes();
+        let body_text = String::from_utf8_lossy(&body).into_owned();
+        let mut request = serde_json::Map::new();
+        let mut uri = self.path.clone();
+        let query = self.query_string();
+        if !query.is_empty() {
+            uri.push('?');
+            uri.push_str(&query);
+        }
+
+        for (key, value) in [
+            ("SCRIPT_FILENAME", "/var/www/html/index.php".to_string()),
+            ("SCRIPT_NAME", "/index.php".to_string()),
+            ("REQUEST_METHOD", self.method.clone()),
+            ("REQUEST_URI", uri),
+            ("QUERY_STRING", query),
+            ("CONTENT_TYPE", self.content_type().to_string()),
+            ("CONTENT_LENGTH", body.len().to_string()),
+            ("POST_DATA", body_text),
+            ("HTTP_COOKIE", self.cookie_header()),
+            ("SERVER_PROTOCOL", "HTTP/1.1".to_string()),
+            ("SERVER_NAME", "localhost".to_string()),
+            ("SERVER_ADDR", "127.0.0.1".to_string()),
+            ("SERVER_PORT", "8000".to_string()),
+            ("HTTP_HOST", "localhost:8000".to_string()),
+            ("REDIRECT_STATUS", "1".to_string()),
+        ] {
+            request.insert(key.to_string(), serde_json::Value::String(value));
+        }
+        for (name, value) in &self.headers {
+            let name = name.trim().to_ascii_uppercase().replace('-', "_");
+            if !name.is_empty() {
+                request.insert(
+                    format!("HTTP_{name}"),
+                    serde_json::Value::String(String::from_utf8_lossy(value).into_owned()),
+                );
+            }
+        }
+
+        let mut config = serde_json::Map::new();
+        let nyx_cpu = std::env::var("ATROPOS_NYX_CPU")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0)
+            .to_string();
+        if self.redqueen {
+            config.insert(
+                "REDQUEEN".to_string(),
+                serde_json::Value::String(nyx_cpu.clone()),
+            );
+        }
+        if self.coverage_dump {
+            config.insert(
+                "COVERAGE_DUMP".to_string(),
+                serde_json::Value::String(nyx_cpu),
+            );
+        }
+        if self.exec_limit > 0 {
+            config.insert(
+                "EXEC_LIMIT".to_string(),
+                serde_json::Value::String(self.exec_limit.to_string()),
+            );
+        }
+
+        let payload = serde_json::json!({
+            "config": config,
+            "requests": [request],
+        });
+        let mut bytes = serde_json::to_vec(&payload).expect("Nyx payload serialization");
+        // The guest agent reads this buffer as a C string before parsing its JSON.
+        bytes.push(0);
+        bytes
     }
 }
 

@@ -1,6 +1,12 @@
 /target/
+/vendor/
 /corpus/
 /solutions/
 /llm/
+/nyx-share/
+/nyx-corpus/
+/nyx-solutions/
 core
 *.core
+/.env
+/.env.*

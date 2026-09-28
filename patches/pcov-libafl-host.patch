@@ -1,0 +1,68 @@
+--- a/pcov.c
++++ b/pcov.c
+@@ -20,11 +20,14 @@
+ #include "config.h"
+ #endif
+ 
++#define ATROPOS_LIBAFL_HOST
+ #define NO_PT_NYX
+ #include "nyx.h"
+ #include "hashmap.h"
+ #include "murmur3.h"
+ #include <sys/shm.h>
++#include <fcntl.h>
++#include <sys/mman.h>
+ 
+ #include "php.h"
+ #include "php_ini.h"
+@@ -1031,6 +1034,20 @@
+ 		hprintf("pcov: bitmap_size: %x\n", bitmap_size);
+ 		hprintf("pcov: bitmap_mask: %x\n", bitmap_mask);
+ 	}
++	if(getenv("SHM_ID") == NULL && getenv("ATROPOS_BITMAP") != NULL) {
++		int bitmap_fd = shm_open(getenv("ATROPOS_BITMAP"), O_RDWR, 0);
++		if(bitmap_fd >= 0) {
++			void *bitmap = mmap(NULL, bitmap_size, PROT_READ | PROT_WRITE, MAP_SHARED, bitmap_fd, 0);
++			close(bitmap_fd);
++			if(bitmap != MAP_FAILED) {
++				trace_buffer = bitmap;
++			} else {
++				perror("mmap ATROPOS_BITMAP");
++			}
++		} else {
++			perror("shm_open ATROPOS_BITMAP");
++		}
++	}
+ 
+ 	REGISTER_NS_LONG_CONSTANT("pcov", "all",         PCOV_FILTER_ALL,     CONST_CS|CONST_PERSISTENT);
+ 	REGISTER_NS_LONG_CONSTANT("pcov", "inclusive",   PCOV_FILTER_INCLUDE, CONST_CS|CONST_PERSISTENT);
+--- a/nyx.h
++++ b/nyx.h
+@@ -219,7 +219,13 @@
+ }while(0)
+ 
+ static inline uint32_t kAFL_hypercall(uint32_t rbx, uint32_t rcx){
++#ifdef ATROPOS_LIBAFL_HOST
++	(void)rbx;
++	(void)rcx;
++	return 0;
++#else
+ 	return KAFL_HYPERCALL_NO_PT(rbx, rcx);
++#endif
+ }
+ #else
+ #define KAFL_HYPERCALL(__rbx, __rcx) \
+@@ -241,7 +247,13 @@
+ }while(0)
+ 
+ static inline uint64_t kAFL_hypercall(uint64_t rbx, uint64_t rcx){
++#ifdef ATROPOS_LIBAFL_HOST
++	(void)rbx;
++	(void)rcx;
++	return 0;
++#else
+ 	return KAFL_HYPERCALL_NO_PT(rbx, rcx);
++#endif
+ }
+ #else
+ #define KAFL_HYPERCALL(__rbx, __rcx) \

@@ -3,215 +3,185 @@ mod input;
 mod llm;
 mod mutate;
 mod openapi;
-mod oracle;
+mod paths;
 mod redqueen;
 mod stage;
 
-use std::{
-    env, fs,
-    path::PathBuf,
-    time::Duration,
-    ffi::CString,
-};
+use std::{borrow::Cow, env, fs};
 
+use input::HttpInput;
 use libafl::{
     corpus::{Corpus, OnDiskCorpus},
     events::SimpleEventManager,
-    executors::{ExitKind, InProcessForkExecutor},
-    feedbacks::MaxMapFeedback,
-    fuzzer::{Evaluator, Fuzzer, StdFuzzer},
+    feedbacks::{CrashFeedback, MaxMapFeedback},
+    fuzzer::{Evaluator, Fuzzer},
     monitors::SimpleMonitor,
-    observers::{HitcountsMapObserver, StdMapObserver},
+    observers::StdMapObserver,
     schedulers::QueueScheduler,
     state::{HasCorpus, HasSolutions, StdState},
+    StdFuzzer,
 };
-use libafl_bolts::{
-    rands::StdRand,
-    shmem::{ShMemProvider, unix_shmem},
-    tuples::tuple_list,
-};
-use crate::{
-    input::HttpInput,
-    llm::{LlmAgent, LlmConfig},
-    mutate::AtroposMutator,
-    openapi::load_operations,
-    oracle::OracleFeedback,
-    stage::AtroposStage,
-};
+use libafl_bolts::{rands::StdRand, tuples::tuple_list};
+use libafl_nyx::{executor::NyxExecutor, helper::NyxHelper, settings::NyxSettings};
+use llm::{LlmAgent, LlmConfig};
+use mutate::AtroposMutator;
+use stage::AtroposStage;
 
-extern "C" {
-    fn atropos_boot() -> i32;
-    fn atropos_execute(
-        method: *const i8,
-        uri: *const i8,
-        query: *const i8,
-        content_type: *const i8,
-        body: *const u8,
-        body_len: usize,
-        cookie: *const i8,
-        headers: *const i8,
-        redqueen: i32,
-        exec_limit: u32,
-    ) -> i32;
-}
-
-fn c_string(text: &str) -> CString {
-    CString::new(text.replace('\0', "")).unwrap_or_else(|_| CString::new("").unwrap())
-}
-
-fn mmap_bitmap() -> *mut u8 {
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/shm/atropos_bitmap")
-        .expect("bitmap");
-    let size = 8 * 1024 * 1024;
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            size,
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED,
-            std::os::unix::io::AsRawFd::as_raw_fd(&file),
-            0,
-        )
+fn load_operations() -> Vec<openapi::Operation> {
+    let Some(path) = paths::openapi_path() else {
+        return Vec::new();
     };
-    if ptr == libc::MAP_FAILED {
-        panic!("mmap bitmap");
-    }
-    ptr.cast()
-}
-
-fn seeds() -> Vec<HttpInput> {
-    let path = env::var("ATROPOS_OPENAPI")
-        .unwrap_or_else(|_| "/home/user/WuppieFuzz/wordpress/openapi.yaml".to_string());
-    match load_operations(&path) {
-        Ok(operations) if !operations.is_empty() => operations.iter().map(openapi::Operation::to_input).collect(),
-        Ok(_) => vec![HttpInput::batch_seed()],
+    match openapi::load_operations(&path.to_string_lossy()) {
+        Ok(operations) => operations,
         Err(err) => {
             eprintln!("openapi: {err}");
-            vec![HttpInput::batch_seed()]
+            Vec::new()
         }
+    }
+}
+
+fn seeds(operations: &[openapi::Operation]) -> Vec<HttpInput> {
+    if operations.is_empty() {
+        vec![HttpInput::batch_seed()]
+    } else {
+        operations
+            .iter()
+            .map(openapi::Operation::to_input)
+            .collect()
     }
 }
 
 fn main() {
-    for (key, value) in [
-        ("NYX_REPORT_LFI", "1"),
-        ("NYX_INCLUDE_ERROR_IS_LFI", "1"),
-        ("NYX_REPORT_EVAL", "1"),
-        ("NYX_REPORT_SQL_INJECTION", "1"),
-        ("NYX_REPORT_UNSERIALIZE", "1"),
-    ] {
-        env::set_var(key, value);
+    if let Err(error) = run() {
+        eprintln!("atropos-libafl: {error}");
+        std::process::exit(1);
     }
-    let _ = fs::write("/tmp/bug_oracle_enabled", b"1");
-    unsafe {
-        if atropos_boot() != 0 {
-            eprintln!("atropos_boot failed");
-            std::process::exit(1);
-        }
-    }
+}
 
-    let map_ptr = mmap_bitmap();
-    let observer = unsafe { StdMapObserver::from_mut_ptr("bitmap", map_ptr, 8 * 1024 * 1024) };
-    let observer = HitcountsMapObserver::new(observer);
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let share_dir = paths::nyx_share_dir();
+    let workdir = paths::nyx_workdir_dir();
+    if !share_dir.join("config.ron").is_file() {
+        return Err(format!(
+            "Nyx config is missing at {}; run scripts/prepare-nyx-share.sh after building the guest image",
+            share_dir.join("config.ron").display()
+        )
+        .into());
+    }
+    if !share_dir.join("default_config.ron").is_file() {
+        return Err(format!(
+            "Nyx default config is missing at {}; run scripts/prepare-nyx-share.sh",
+            share_dir.join("default_config.ron").display()
+        )
+        .into());
+    }
+    let vm_image = paths::nyx_vm_image();
+    if !vm_image.is_file() {
+        return Err(format!(
+            "Nyx VM image is missing at {}; run scripts/create-nyx-vm.sh",
+            vm_image.display()
+        )
+        .into());
+    }
+    let presnapshot = paths::nyx_presnapshot();
+    if !presnapshot.is_dir() || !fs::read_dir(&presnapshot)?.next().transpose()?.is_some() {
+        return Err(format!(
+            "Nyx pre-snapshot is missing or empty at {}; enable KVM Nyx and run scripts/create-nyx-vm.sh",
+            presnapshot.display()
+        )
+        .into());
+    }
+    fs::create_dir_all(&workdir)?;
+
+    let cpu_id = paths::nyx_cpu_id();
+    let timeout_secs = env::var("ATROPOS_NYX_TIMEOUT_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u8>().ok())
+        .unwrap_or(2);
+    let settings = NyxSettings::builder()
+        .cpu_id(cpu_id)
+        .parent_cpu_id(None)
+        .timeout_secs(timeout_secs)
+        .workdir_path(Cow::Owned(workdir.to_string_lossy().into_owned()))
+        .build();
+    let helper = NyxHelper::new(&share_dir, settings).map_err(|err| {
+        format!(
+            "failed to start LibAFL Nyx from {}: {err}",
+            share_dir.display()
+        )
+    })?;
+    let observer = unsafe {
+        StdMapObserver::from_mut_ptr("nyx-pcov", helper.bitmap_buffer, helper.bitmap_size)
+    };
+
+    let output_dir = paths::output_dir();
+    let corpus_dir = output_dir.join("nyx-corpus");
+    let solution_dir = output_dir.join("nyx-solutions");
+    fs::create_dir_all(&corpus_dir)?;
+    fs::create_dir_all(&solution_dir)?;
+
     let mut feedback = MaxMapFeedback::new(&observer);
-    let mut objective = OracleFeedback::new();
-
-    let corpus_dir = PathBuf::from("/home/user/atropos-libafl/corpus");
-    let solution_dir = PathBuf::from("/home/user/atropos-libafl/solutions");
-    fs::create_dir_all(&corpus_dir).unwrap();
-    fs::create_dir_all(&solution_dir).unwrap();
-
+    // Atropos reports PHP crashes and its application-level bug oracles through Nyx's
+    // extended-crash hypercall, which libafl_nyx maps to ExitKind::Crash.
+    let mut objective = CrashFeedback::new();
     let mut state = StdState::new(
         StdRand::new(),
-        OnDiskCorpus::new(corpus_dir).unwrap(),
-        OnDiskCorpus::new(solution_dir).unwrap(),
+        OnDiskCorpus::new(corpus_dir)?,
+        OnDiskCorpus::new(solution_dir)?,
         &mut feedback,
         &mut objective,
-    )
-    .unwrap();
+    )?;
 
-    let mon = SimpleMonitor::new(|line| println!("{line}"));
-    let mut mgr = SimpleEventManager::new(mon);
+    let monitor = SimpleMonitor::new(|line| println!("{line}"));
+    let mut manager = SimpleEventManager::new(monitor);
     let scheduler = QueueScheduler::new();
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
+    let mut executor = NyxExecutor::builder().build(helper, tuple_list!(observer));
 
-    let mut harness = |input: &HttpInput| {
-        let method = c_string(&input.method);
-        let uri = c_string(&input.path);
-        let query = c_string(&input.query_string());
-        let content_type = c_string(input.content_type());
-        let body = input.body_bytes();
-        let cookie = c_string(&input.cookie_header());
-        let mut header_lines: Vec<String> = input
-            .headers
-            .iter()
-            .map(|(name, value)| format!("{name}: {}", String::from_utf8_lossy(value)))
-            .collect();
-        if input.coverage_dump {
-            header_lines.push("X-Atropos-Coverage: 1".to_string());
+    let operations = load_operations();
+    if state.corpus().count() == 0 {
+        for seed in seeds(&operations) {
+            fuzzer.add_input(&mut state, &mut executor, &mut manager, seed)?;
         }
-        let headers = c_string(&header_lines.join("\n"));
-        let rc = unsafe {
-            atropos_execute(
-                method.as_ptr(),
-                uri.as_ptr(),
-                query.as_ptr(),
-                content_type.as_ptr(),
-                body.as_ptr(),
-                body.len(),
-                cookie.as_ptr(),
-                headers.as_ptr(),
-                i32::from(input.redqueen),
-                input.exec_limit,
-            )
-        };
-        if rc == 0 { ExitKind::Ok } else { ExitKind::Crash }
-    };
-
-    let mut shmem_provider = unix_shmem::UnixShMemProvider::new().unwrap();
-    let iterations: u64 = env::var("ATROPOS_ITERS")
-        .ok()
-        .and_then(|text| text.parse().ok())
-        .unwrap_or(8);
-    let mut executor = InProcessForkExecutor::new(
-        &mut harness,
-        tuple_list!(observer),
-        &mut fuzzer,
-        &mut state,
-        &mut mgr,
-        Duration::from_secs(20),
-        shmem_provider,
-    )
-    .expect("executor");
-
-    let operations = {
-        let path = env::var("ATROPOS_OPENAPI")
-            .unwrap_or_else(|_| "/home/user/WuppieFuzz/wordpress/openapi.yaml".to_string());
-        load_operations(&path).unwrap_or_default()
-    };
-    let mut stage = AtroposStage::new(AtroposMutator::new(operations), LlmAgent::new(LlmConfig::from_env()));
-
-    for seed in seeds() {
-        fuzzer.add_input(&mut state, &mut executor, &mut mgr, seed).expect("seed");
     }
-    stage.havoc.reload_redqueen();
 
-    fuzzer
-        .fuzz_loop_for(
-            &mut tuple_list!(stage),
-            &mut executor,
-            &mut state,
-            &mut mgr,
-            iterations,
-        )
-        .expect("fuzz loop");
+    let mut stage = AtroposStage::new(
+        AtroposMutator::new(operations),
+        LlmAgent::new(LlmConfig::from_env()),
+    );
+    stage.havoc.reload_redqueen();
+    let mut stages = tuple_list!(stage);
+
+    eprintln!(
+        "LibAFL Nyx ready: share={}, workdir={}, cpu={}, bitmap={} bytes",
+        share_dir.display(),
+        workdir.display(),
+        cpu_id,
+        executor.helper.bitmap_size
+    );
+
+    match env::var("ATROPOS_NYX_ITERS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        Some(iterations) => {
+            fuzzer.fuzz_loop_for(
+                &mut stages,
+                &mut executor,
+                &mut state,
+                &mut manager,
+                iterations,
+            )?;
+        }
+        None => {
+            fuzzer.fuzz_loop(&mut stages, &mut executor, &mut state, &mut manager)?;
+        }
+    }
 
     println!(
         "corpus={} solutions={}",
         state.corpus().count(),
         state.solutions().count()
     );
+    Ok(())
 }
