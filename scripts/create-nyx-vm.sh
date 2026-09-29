@@ -18,6 +18,7 @@ SEED_ISO="$VM_DIR/cloud-init-seed.iso"
 PAYLOAD_DIR="$VM_DIR/payload"
 BUNDLE="${ATROPOS_NYX_GUEST_BUNDLE:-$DATA_DIR/bundle/guest-bundle.tar.gz}"
 QEMU_NYX="${ATROPOS_NYX_QEMU:-$REPO_ROOT/target/nyx/QEMU-Nyx/x86_64-softmmu/qemu-system-x86_64}"
+QEMU_TCG="${ATROPOS_NYX_TCG_QEMU:-$(command -v qemu-system-x86_64 || true)}"
 DISK_SIZE_GB="${ATROPOS_NYX_DISK_GB:-32}"
 MEMORY_MB="${ATROPOS_NYX_MEMORY_MB:-8192}"
 CPU_COUNT="${ATROPOS_NYX_BOOT_CPUS:-1}"
@@ -31,6 +32,10 @@ for command in curl sha256sum awk qemu-img cloud-localds genisoimage timeout; do
 done
 if [[ ! -x "$QEMU_NYX" ]]; then
 	printf 'Nyx QEMU is missing at %s; run scripts/build-nyx-fuzzer.sh first\n' "$QEMU_NYX" >&2
+	exit 1
+fi
+if [[ ! -x "$QEMU_TCG" ]]; then
+	printf 'Standard QEMU is missing; install qemu-system-x86 or set ATROPOS_NYX_TCG_QEMU to its executable path\n' >&2
 	exit 1
 fi
 if [[ ! -f "$BUNDLE" ]]; then
@@ -86,7 +91,6 @@ write_files:
       #!/usr/bin/env bash
       set -euxo pipefail
       export DEBIAN_FRONTEND=noninteractive
-      apt-get update
       mkdir -p /etc/mysql/mariadb.conf.d
       cat >/etc/mysql/mariadb.conf.d/90-atropos-nyx.cnf <<'MYSQL'
       [mysqld]
@@ -98,7 +102,10 @@ write_files:
       exit 101
       POLICY
       chmod 0755 /usr/sbin/policy-rc.d
-      apt-get install -y mariadb-server
+      if ! dpkg-query -W -f='${Status}' mariadb-server 2>/dev/null | grep -qx 'install ok installed'; then
+        apt-get update
+        apt-get install -y mariadb-server
+      fi
       rm -f /usr/sbin/policy-rc.d
       mkdir -p /mnt/atropos-payload
       mount -L ATROPOSPAYLOAD /mnt/atropos-payload
@@ -125,7 +132,7 @@ if [[ "${ATROPOS_NYX_SKIP_CLOUD_INIT:-0}" != 1 ]]; then
 	if [[ ! -e "$VM_DIR/cloud-init-complete" ]]; then
 		printf 'Provisioning Ubuntu guest; cloud-init installs MariaDB and imports the local WordPress snapshot.\n'
 		set +e
-		timeout --signal=TERM 30m "$QEMU_NYX" \
+		timeout --signal=TERM 30m "$QEMU_TCG" \
 			-accel tcg -machine pc -cpu qemu64 -smp "$CPU_COUNT" -m "$MEMORY_MB" \
 			-boot order=c \
 			-drive "file=$VM_IMAGE,format=qcow2,if=virtio" \
@@ -175,7 +182,7 @@ else
 	printf 'Booting the Nyx guest once to create its pre-snapshot.\n'
 	set +e
 		timeout --signal=TERM 5m env NYX_DISABLE_DIRTY_RING=y "$QEMU_NYX" \
-		-enable-kvm -machine kAFL64-v1 -cpu kAFL64-Hypervisor-v1 \
+		-enable-kvm -machine kAFL64-v1 -cpu kAFL64-Hypervisor-v2 \
 		-smp 1 -m "$MEMORY_MB" -drive "file=$VM_IMAGE,format=qcow2,index=0,media=disk" \
 		-k de -net none -display none -serial "file:$PREIMAGE_LOG" -monitor none \
 		-fast_vm_reload "pre_path=$PREIMAGE,load=off"

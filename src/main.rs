@@ -4,7 +4,6 @@ mod llm;
 mod mutate;
 mod openapi;
 mod paths;
-mod redqueen;
 mod stage;
 
 use std::{borrow::Cow, env, fs};
@@ -145,11 +144,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let mut stage = AtroposStage::new(
+    let stage = AtroposStage::new(
         AtroposMutator::new(operations),
         LlmAgent::new(LlmConfig::from_env()),
     );
-    stage.havoc.reload_redqueen();
     let mut stages = tuple_list!(stage);
 
     eprintln!(

@@ -3,7 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-export ATROPOS_OUTPUT_DIR="${ATROPOS_OUTPUT_DIR:-$REPO_ROOT}"
+WORDPRESS_ROOT="${ATROPOS_WORDPRESS_ROOT:-$REPO_ROOT/../wordpress}"
+export ATROPOS_OUTPUT_DIR="${ATROPOS_OUTPUT_DIR:-$WORDPRESS_ROOT/atropos-output}"
 
 if [[ ! -f "${ATROPOS_NYX_SHARE:-$HOME/.local/share/atropos-libafl/nyx/share}/config.ron" ]]; then
 	printf 'Nyx config is missing; build the guest image and run scripts/prepare-nyx-share.sh first\n' >&2

@@ -36,7 +36,7 @@ Build LibAFL with the Nyx profile. This checks out QEMU-Nyx and Packer and build
 scripts/build-nyx-fuzzer.sh
 ```
 
-Build PHP 7.4 `php-cgi`, the original Nyx-aware PCOV, and the Nim guest agent directly on the host. Sources are copied to temporary build directories; the original legacy checkout stays unchanged. The PHP CLI is installed under `~/.local/opt/atropos-libafl-nyx-php`, while guest files are kept under `~/.local/share/atropos-libafl/nyx/guest`:
+Build PHP 7.4 `php-cgi`, Nyx-aware PCOV, PHP_CodeCoverage 9.2.31, phpcov 8.2.1, and the Nim guest agent directly on the host. Composer installs the pinned reporting tools into the local Nyx artifact directory; the original legacy checkout stays unchanged. The PHP CLI is installed under `~/.local/opt/atropos-libafl-nyx-php`, while guest files are kept under `~/.local/share/atropos-libafl/nyx/guest`:
 
 ```sh
 scripts/build-nyx-php.sh
@@ -74,7 +74,7 @@ scripts/package-nyx-guest.sh
 scripts/create-nyx-vm.sh
 ```
 
-`create-nyx-vm.sh` uses QEMU-Nyx under TCG, `cloud-init`, and a temporary user-mode network connection to provision the guest. This first boot does not require KVM. It defers starting MariaDB because TCG can corrupt its InnoDB initialization; on the first KVM-Nyx boot, guest services initialize MariaDB, import the WordPress database, start the PHP guest agent, and create the pre-snapshot. The pre-snapshot service detects the Nyx CPU, disables itself in the snapshot state, and issues `HYPERCALL_KAFL_LOCK`. The script writes LibAFL's `config.ron` and `default_config.ron` after the snapshot is available.
+`create-nyx-vm.sh` uses standard QEMU under TCG, `cloud-init`, and a temporary user-mode network connection to provision the guest so disk writes persist. The Nyx-specific QEMU binary is used for KVM pre-snapshot creation and fuzzing. The provisioning boot does not require KVM. It defers starting MariaDB because TCG can corrupt its InnoDB initialization; on the first KVM-Nyx boot, guest services initialize MariaDB, import the WordPress database, start the PHP guest agent, and create the pre-snapshot. The pre-snapshot service detects the Nyx CPU, disables itself in the snapshot state, and issues `HYPERCALL_KAFL_LOCK`. The script writes LibAFL's `config.ron` and `default_config.ron` after the snapshot is available.
 
 Large images, snapshots, and the local database bundle stay under `~/.local/share/atropos-libafl/nyx` by default. To use another location, set `ATROPOS_NYX_DATA_DIR`; `ATROPOS_NYX_SHARE`, `ATROPOS_NYX_WORKDIR`, `ATROPOS_NYX_VM_DIR`, `ATROPOS_NYX_VM_IMAGE`, `ATROPOS_NYX_PRESNAPSHOT`, and `ATROPOS_NYX_QEMU` can override individual paths. These local files contain the WordPress database and its credentials and are created with user-only permissions.
 
@@ -96,13 +96,15 @@ Useful environment variables:
 | `ATROPOS_NYX_WORKDIR` | `~/.local/share/atropos-libafl/nyx/workdir` | QEMU-Nyx work and guest dumps |
 | `ATROPOS_NYX_CPU` | `0` | Nyx worker ID |
 | `ATROPOS_NYX_TIMEOUT_SECS` | `2` | Per-input execution timeout |
+| `ATROPOS_NYX_COVERAGE_TIMEOUT_SECS` | `60` | Per-testcase timeout while collecting detailed queue coverage |
 | `ATROPOS_NYX_ITERS` | unlimited | Stop after this many fuzz iterations |
-| `ATROPOS_OUTPUT_DIR` | this checkout | Corpus and solution output directory |
+| `ATROPOS_OUTPUT_DIR` | `<WordPress directory>/atropos-output` | Corpus, solutions, and coverage output directory |
 | `ATROPOS_OPENAPI` | unset | OpenAPI YAML used to seed requests |
+| `ATROPOS_LLM_REQUESTS_PER_SESSION` | `1` | Independent requests to ask for and evaluate in one ACP session (1–32) |
 
-The corpus and saved crashes/oracle hits are written to `nyx-corpus/` and `nyx-solutions/` under `ATROPOS_OUTPUT_DIR`. The optional LLM stage retains the existing `ATROPOS_LLM_*` configuration. It can request a guest PCOV line dump; ordinary fuzzing coverage is read directly from Nyx's bitmap observer.
+The corpus and saved crashes/oracle hits are written to `nyx-corpus/` and `nyx-solutions/` under `ATROPOS_OUTPUT_DIR`. The optional LLM stage retains the existing `ATROPOS_LLM_*` configuration. When its stall/probability gate fires, it replays every enabled corpus testcase with `coverage_dump` enabled and RedQueen disabled, saves each fresh guest dump temporarily, remaps guest source paths with PHP_CodeCoverage, and uses host-side phpcov to rebuild `coverage/queue.cobertura.xml` and `coverage/queue.cov` from that pass only. The last successfully published queue report stays available until a later scan has a replacement; a failed or interrupted scan cannot erase it. The per-testcase request summaries and any failed corpus IDs are written to `llm/queue.json`; temporary per-testcase coverage files are removed after merging. The agent reads the queue-level Cobertura report and request manifest to generate one or more independent requests in a single ACP session, then Atropos evaluates each request separately; requests do not inherit the currently scheduled testcase. Rust transports the reports and invokes PHP_CodeCoverage and phpcov; it does not parse coverage rows or generate Cobertura XML. Ordinary fuzzing coverage is still read directly from Nyx's bitmap observer. The guest PHP memory limit is 512 MiB for detailed coverage collection; the host PHP CLI uses a 2 GiB limit while remapping and merging. The guest image must include the PHP_CodeCoverage prepend/append runtime; if the current image does not, rebuild and package the PHP guest, then recreate the snapshot.
 
-Set `ATROPOS_OPENAPI=/path/to/openapi.yaml` to create seeds from an OpenAPI document. Without it, the fuzzer uses the built-in WordPress batch seed. The LLM stage runs after 50 executions without a new corpus input, with an 80% chance per eligible execution. It uses Node.js/npm through `npx`; the default `codex` provider expects `~/.codex/auth.json`, and `ATROPOS_LLM_PROVIDER=claude` uses `~/.claude`. Configure `ATROPOS_LLM_AUTH_FILE`, `ATROPOS_LLM_API_KEY`, `ATROPOS_LLM_BASE_URL`, `ATROPOS_LLM_MODEL`, `ATROPOS_LLM_STALL`, `ATROPOS_LLM_PROB`, or `ATROPOS_LLM_TIMEOUT` to override those defaults. Set `ATROPOS_SCHEMA_VIOLATION_RATE` to change the mutator's default 10% schema-violation rate.
+Set `ATROPOS_OPENAPI=/path/to/openapi.yaml` to create seeds from an OpenAPI document. Without it, the fuzzer uses the built-in WordPress batch seed. The LLM stage runs after 50 executions without a new corpus input, with an 80% chance per eligible execution. On each trigger, one ACP session can return multiple independent `HttpInput` requests; Atropos evaluates them sequentially. Set `ATROPOS_LLM_REQUESTS_PER_SESSION` to request 1–32 inputs (default `1`). It uses Node.js/npm through `npx`; the default `codex` provider expects `~/.codex/auth.json` and launches Codex ACP with `INITIAL_AGENT_MODE=agent-full-access`, while `ATROPOS_LLM_PROVIDER=claude` uses `~/.claude`. Configure `ATROPOS_LLM_AUTH_FILE`, `ATROPOS_LLM_API_KEY`, `ATROPOS_LLM_BASE_URL`, `ATROPOS_LLM_MODEL`, `ATROPOS_LLM_STALL`, `ATROPOS_LLM_PROB`, or `ATROPOS_LLM_TIMEOUT` to override those defaults. Set `ATROPOS_SCHEMA_VIOLATION_RATE` to change the mutator's default 10% schema-violation rate.
 
 For a short smoke run after building the guest:
 

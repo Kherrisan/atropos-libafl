@@ -3,11 +3,12 @@ use std::marker::PhantomData;
 
 use libafl::state::HasRand;
 use libafl::{
+    executors::{HasTimeout, SetTimeout},
     fuzzer::Evaluator,
     inputs::Input,
     mutators::{MutationResult, Mutator},
     stages::{Restartable, Stage},
-    state::HasCurrentTestcase,
+    state::{HasCorpus, HasCurrentTestcase},
     Error,
 };
 use libafl_bolts::Named;
@@ -50,7 +51,8 @@ impl<E, EM, S, Z> Restartable<S> for AtroposStage<E, EM, S, Z> {
 
 impl<E, EM, S, Z> Stage<E, EM, S, Z> for AtroposStage<E, EM, S, Z>
 where
-    S: HasCurrentTestcase<HttpInput> + HasRand,
+    E: HasTimeout + SetTimeout,
+    S: HasCorpus<HttpInput> + HasCurrentTestcase<HttpInput> + HasRand,
     Z: Evaluator<E, EM, HttpInput, S> + libafl::fuzzer::ExecutesInput<E, EM, HttpInput, S>,
     HttpInput: Input,
 {
@@ -61,29 +63,24 @@ where
         state: &mut S,
         manager: &mut EM,
     ) -> Result<(), Error> {
-        let mut input = state.current_input_cloned()?;
         if self.llm.should_fire(state) {
             eprintln!(
                 "llm agent: {} executions without a new corpus entry",
                 self.llm_stall()
             );
-            return self.llm.mutate_and_run(
-                fuzzer,
-                executor,
-                state,
-                manager,
-                &mut self.havoc,
-                &mut input,
-            );
+            return self
+                .llm
+                .generate_and_run(fuzzer, executor, state, manager, &mut self.havoc);
         }
 
+        let mut input = state.current_input_cloned()?;
         let mutated = self.havoc.mutate(state, &mut input)?;
         if mutated == MutationResult::Skipped {
             return Ok(());
         }
         let (_, corpus_id) = fuzzer.evaluate_input(state, executor, manager, &input)?;
         self.havoc.post_exec(state, corpus_id)?;
-        self.llm.note(corpus_id, &input);
+        self.llm.note(corpus_id);
         Ok(())
     }
 }

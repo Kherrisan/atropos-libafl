@@ -225,7 +225,7 @@ impl HttpInput {
             operation_key: Some("POST /wp-json/batch/v1".to_string()),
             pin_route: true,
             exec_limit: 0,
-            redqueen: true,
+            redqueen: false,
             coverage_dump: false,
         }
     }
@@ -311,12 +311,6 @@ impl HttpInput {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(0)
             .to_string();
-        if self.redqueen {
-            config.insert(
-                "REDQUEEN".to_string(),
-                serde_json::Value::String(nyx_cpu.clone()),
-            );
-        }
         if self.coverage_dump {
             config.insert(
                 "COVERAGE_DUMP".to_string(),
@@ -329,7 +323,6 @@ impl HttpInput {
                 serde_json::Value::String(self.exec_limit.to_string()),
             );
         }
-
         let payload = serde_json::json!({
             "config": config,
             "requests": [request],

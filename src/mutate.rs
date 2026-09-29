@@ -11,7 +11,6 @@ use libafl_bolts::{rands::Rand, Named};
 use crate::{
     input::{HttpInput, JsonValue},
     openapi::{Operation, Schema},
-    redqueen::RedqueenDict,
 };
 
 const CANARIES: &[&[u8]] = &[
@@ -25,7 +24,6 @@ const CANARIES: &[&[u8]] = &[
 pub struct AtroposMutator {
     name: Cow<'static, str>,
     operations: Vec<Operation>,
-    redqueen: RedqueenDict,
     violation_rate: f64,
 }
 
@@ -38,16 +36,8 @@ impl AtroposMutator {
         Self {
             name: Cow::Borrowed("atropos"),
             operations,
-            redqueen: RedqueenDict::default(),
             violation_rate,
         }
-    }
-
-    pub fn reload_redqueen(&mut self) {
-        let path = crate::paths::nyx_workdir_dir()
-            .join("dump")
-            .join(format!("strings_{}", crate::paths::nyx_cpu_id()));
-        self.redqueen = RedqueenDict::load(&path);
     }
 }
 
@@ -65,24 +55,18 @@ where
         let violate = state.rand_mut().coinflip(self.violation_rate);
         if violate {
             violate_input(state, input);
-        } else if !mutate_leaf(state, input, &self.operations, &self.redqueen) {
-            insert_key(state, input, &self.redqueen);
+        } else if !mutate_leaf(state, input, &self.operations) {
+            insert_key(state, input);
         }
         Ok(MutationResult::Mutated)
     }
 
     fn post_exec(&mut self, _state: &mut S, _new_corpus_id: Option<CorpusId>) -> Result<(), Error> {
-        self.reload_redqueen();
         Ok(())
     }
 }
 
-fn mutate_leaf<S: HasRand>(
-    state: &mut S,
-    input: &mut HttpInput,
-    operations: &[Operation],
-    redqueen: &RedqueenDict,
-) -> bool {
+fn mutate_leaf<S: HasRand>(state: &mut S, input: &mut HttpInput, operations: &[Operation]) -> bool {
     input.body_override = None;
     if !input.pin_route && state.rand_mut().below_or_zero(20) == 0 {
         input.path.push_str("/x");
@@ -113,12 +97,12 @@ fn mutate_leaf<S: HasRand>(
     }
     match leaf {
         JsonValue::String(bytes) => {
-            havoc_bytes(state, bytes, redqueen);
+            havoc_bytes(state, bytes);
             true
         }
         JsonValue::Number(text) => {
             let mut bytes = text.as_bytes().to_vec();
-            havoc_bytes(state, &mut bytes, redqueen);
+            havoc_bytes(state, &mut bytes);
             *text = String::from_utf8_lossy(&bytes).into_owned();
             true
         }
@@ -155,24 +139,8 @@ fn enum_for(schema: Option<&Schema>, _path: &[usize], _body: &JsonValue) -> Opti
     }
 }
 
-fn havoc_bytes<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>, redqueen: &RedqueenDict) {
+fn havoc_bytes<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>) {
     let roll = state.rand_mut().below_or_zero(10);
-    if roll == 0 && !redqueen.unmatched.is_empty() {
-        let index = state.rand_mut().below_or_zero(redqueen.unmatched.len());
-        let (left, right) = redqueen.unmatched[index].clone();
-        if !left.is_empty() && bytes.windows(left.len()).any(|window| window == left) {
-            replace_first(bytes, &left, &right);
-            return;
-        }
-        if !right.is_empty() && bytes.windows(right.len()).any(|window| window == right) {
-            replace_first(bytes, &right, &left);
-            return;
-        }
-    }
-    if roll <= 2 && !redqueen.strings.is_empty() {
-        *bytes = redqueen.strings[state.rand_mut().below_or_zero(redqueen.strings.len())].clone();
-        return;
-    }
     if roll == 3 {
         *bytes = CANARIES[state.rand_mut().below_or_zero(CANARIES.len())].to_vec();
         return;
@@ -194,30 +162,16 @@ fn havoc_bytes<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>, redqueen: &Redque
             let index = state.rand_mut().below_or_zero(bytes.len());
             bytes.remove(index);
         }
-        _ => {
-            if redqueen.strings.is_empty() {
-                bytes.push(printable(state));
-            } else {
-                let extra = redqueen.strings
-                    [state.rand_mut().below_or_zero(redqueen.strings.len())]
-                .clone();
-                bytes.extend(extra);
-            }
-        }
+        _ => bytes.push(printable(state)),
     }
 }
 
-fn insert_key<S: HasRand>(state: &mut S, input: &mut HttpInput, redqueen: &RedqueenDict) {
-    let key = if !redqueen.keys.is_empty() && state.rand_mut().below_or_zero(10) < 9 {
-        String::from_utf8_lossy(&redqueen.keys[state.rand_mut().below_or_zero(redqueen.keys.len())])
-            .to_string()
+fn insert_key<S: HasRand>(state: &mut S, input: &mut HttpInput) {
+    let name = format!("k{}", state.rand_mut().below_or_zero(100));
+    let key = if state.rand_mut().below_or_zero(10) == 0 {
+        format!("{name}[{}]", state.rand_mut().below_or_zero(4))
     } else {
-        let name = format!("k{}", state.rand_mut().below_or_zero(100));
-        if state.rand_mut().below_or_zero(10) == 0 {
-            format!("{name}[{}]", state.rand_mut().below_or_zero(4))
-        } else {
-            name
-        }
+        name
     };
     let key = key.replace('\0', "");
     if key.is_empty() {
@@ -234,13 +188,7 @@ fn insert_key<S: HasRand>(state: &mut S, input: &mut HttpInput, redqueen: &Redqu
     if fields.iter().any(|(name, _)| name == &key) {
         return;
     }
-    let value = if !redqueen.strings.is_empty() {
-        JsonValue::String(
-            redqueen.strings[state.rand_mut().below_or_zero(redqueen.strings.len())].clone(),
-        )
-    } else {
-        JsonValue::String(b"1".to_vec())
-    };
+    let value = JsonValue::String(b"1".to_vec());
     fields.push((key, value));
 }
 
@@ -275,12 +223,6 @@ fn violate_input<S: HasRand>(state: &mut S, input: &mut HttpInput) {
             raw.extend_from_slice(b"\xff");
             input.body_override = Some(raw);
         }
-    }
-}
-
-fn replace_first(bytes: &mut Vec<u8>, from: &[u8], to: &[u8]) {
-    if let Some(position) = bytes.windows(from.len()).position(|window| window == from) {
-        bytes.splice(position..position + from.len(), to.iter().copied());
     }
 }
 

@@ -17,9 +17,10 @@ SECRET_FILE="${ATROPOS_WORDPRESS_SECRET_FILE:-$HOME/.config/atropos-libafl/wordp
 DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/atropos-libafl/nyx}"
 BUNDLE_DIR="$DATA_DIR/bundle"
 
-for path in "$ARTIFACT_DIR/nyx-php-runtime.tar.gz" "$ARTIFACT_DIR/atropos_agent" \
+for path in "$ARTIFACT_DIR/nyx-php-runtime.tar.gz" "$ARTIFACT_DIR/php-code-coverage-runtime" \
+	"$ARTIFACT_DIR/atropos-agent-phpcov-runtime" "$ARTIFACT_DIR/atropos_agent" \
 	"$WP_ROOT/index.php" "$WP_ROOT/wp-config.php" "$SECRET_FILE" \
-	"$LEGACY_ROOT/fuzzer/nyx.h"; do
+	"$LEGACY_ROOT/fuzzer/nyx.h" "$SCRIPT_DIR/nyx-guest-launch.sh"; do
 	if [[ ! -e "$path" ]]; then
 		printf 'Required Nyx guest input is missing: %s\n' "$path" >&2
 		exit 1
@@ -63,6 +64,8 @@ chmod 600 "$BUNDLE_DIR/wordpress-db.env"
 
 cp -- "$ARTIFACT_DIR/nyx-php-runtime.tar.gz" "$BUNDLE_DIR/"
 cp -- "$ARTIFACT_DIR/atropos_agent" "$BUNDLE_DIR/"
+cp -- "$SCRIPT_DIR/nyx-guest-launch.sh" "$BUNDLE_DIR/atropos-nyx-launch"
+chmod 0755 "$BUNDLE_DIR/atropos-nyx-launch"
 cat >"$BUNDLE_DIR/nyx-preimage.c" <<'C'
 #define NO_PT_NYX
 #include "nyx.h"
@@ -169,6 +172,7 @@ mariadb --protocol=socket -uroot < /usr/local/lib/atropos-nyx-db/wordpress-db.sq
 touch /var/lib/mysql/.atropos-nyx-db-imported
 rm -rf /usr/local/lib/atropos-nyx-db
 DBIMPORT
+chmod 0755 /usr/local/sbin/atropos-nyx-db-prepare /usr/local/sbin/atropos-nyx-db-import
 cat >/etc/systemd/system/atropos-nyx-db-prepare.service <<'UNIT'
 [Unit]
 Description=Initialize the Atropos Nyx MariaDB data directory
@@ -204,22 +208,19 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
-tar -xzf nyx-php-runtime.tar.gz -C /tmp
+install -d -o root -g root -m 0755 /usr/local/lib/atropos-nyx-php
+tar -xzf nyx-php-runtime.tar.gz -C /usr/local/lib/atropos-nyx-php
 cp -- atropos_agent /usr/local/bin/atropos_agent
 cp -- atropos-nyx-preimage /usr/local/bin/atropos-nyx-preimage
-cat >/usr/local/bin/atropos-nyx-launch <<'LAUNCH'
-#!/usr/bin/env bash
-set -euo pipefail
-if ! /usr/local/bin/atropos-nyx-preimage --check; then
-	exit 0
+cp -- atropos-nyx-launch /usr/local/bin/atropos-nyx-launch
+chmod 0755 /usr/local/bin/atropos_agent \
+	/usr/local/bin/atropos-nyx-preimage /usr/local/bin/atropos-nyx-launch \
+	/usr/local/lib/atropos-nyx-php/target_executable \
+	/usr/local/lib/atropos-nyx-php/pcov.so
+chmod 0644 /usr/local/lib/atropos-nyx-php/php.ini
+if [[ -f /usr/local/lib/atropos-nyx-php/opcache.so ]]; then
+	chmod 0644 /usr/local/lib/atropos-nyx-php/opcache.so
 fi
-exec env IN_NYX=1 PHP_TARGET=/tmp/target_executable LD_LIBRARY_PATH=/tmp/ \
-	/usr/local/bin/atropos_agent
-LAUNCH
-chmod 0755 /usr/local/bin/atropos_agent /tmp/target_executable
-chmod 0755 /usr/local/bin/atropos-nyx-preimage /usr/local/bin/atropos-nyx-launch
-cp -a /tmp/lib/. /tmp/
-chmod 0644 /tmp/php.ini /tmp/pcov.so
 
 cat >/etc/systemd/system/atropos-nyx-agent.service <<'UNIT'
 [Unit]
@@ -262,7 +263,8 @@ EOF
 chmod 0700 "$BUNDLE_DIR/install-guest.sh"
 
 tar -C "$BUNDLE_DIR" -czf "$BUNDLE_DIR/guest-bundle.tar.gz" \
-	nyx-php-runtime.tar.gz atropos_agent atropos-nyx-preimage wordpress wordpress-db.sql wordpress-db.env install-guest.sh
+	nyx-php-runtime.tar.gz atropos_agent atropos-nyx-preimage atropos-nyx-launch \
+	wordpress wordpress-db.sql wordpress-db.env install-guest.sh
 chmod 600 "$BUNDLE_DIR/guest-bundle.tar.gz"
 printf 'Nyx guest bundle created at %s\n' "$BUNDLE_DIR/guest-bundle.tar.gz"
 printf 'The bundle contains a local copy of the WordPress database and credentials.\n'

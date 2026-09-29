@@ -23,7 +23,7 @@ pub fn project_dir() -> PathBuf {
 pub fn output_dir() -> PathBuf {
     env::var_os("ATROPOS_OUTPUT_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(project_dir)
+        .unwrap_or_else(|| wordpress_root().join("atropos-output"))
 }
 
 pub fn wordpress_root() -> PathBuf {
@@ -48,6 +48,30 @@ pub fn nyx_vm_dir() -> PathBuf {
     env::var_os("ATROPOS_NYX_VM_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| nyx_data_dir().join("vm"))
+}
+
+pub fn nyx_guest_artifact_dir() -> PathBuf {
+    env::var_os("ATROPOS_NYX_GUEST_ARTIFACTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| user_data_dir().join("nyx/guest"))
+}
+
+pub fn nyx_php_cli() -> PathBuf {
+    env::var_os("ATROPOS_NYX_PHP_PREFIX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join(".local/opt/atropos-libafl-nyx-php")
+        })
+        .join("bin/php")
+}
+
+pub fn phpcov_binary() -> PathBuf {
+    env::var_os("ATROPOS_PHPCOV_BINARY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| nyx_guest_artifact_dir().join("php-code-coverage/vendor/bin/phpcov"))
 }
 
 pub fn nyx_vm_image() -> PathBuf {

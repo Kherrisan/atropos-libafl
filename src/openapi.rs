@@ -39,7 +39,7 @@ impl Operation {
             operation_key: Some(self.key.clone()),
             pin_route: true,
             exec_limit: 0,
-            redqueen: true,
+            redqueen: false,
             coverage_dump: false,
         }
     }

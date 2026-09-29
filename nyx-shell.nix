@@ -29,6 +29,7 @@ pkgs.mkShell {
     python3Packages.jinja2
     python3Packages.msgpack
     python3Packages.setuptools
+    qemu
     qemu-utils
     ripgrep
     re2c
