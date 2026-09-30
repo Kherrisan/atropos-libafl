@@ -8,7 +8,7 @@ mod stage;
 
 use std::{borrow::Cow, env, fs};
 
-use input::HttpInput;
+use input::{HttpInput, NYX_INPUT_BUFFER_SIZE};
 use libafl::{
     corpus::{Corpus, OnDiskCorpus},
     events::SimpleEventManager,
@@ -23,8 +23,8 @@ use libafl::{
 use libafl_bolts::{rands::StdRand, tuples::tuple_list};
 use libafl_nyx::{executor::NyxExecutor, helper::NyxHelper, settings::NyxSettings};
 use llm::{LlmAgent, LlmConfig};
-use mutate::AtroposMutator;
-use stage::AtroposStage;
+use mutate::DeterministicMutator;
+use stage::DeterministicStage;
 
 fn load_operations() -> Vec<openapi::Operation> {
     let Some(path) = paths::openapi_path() else {
@@ -100,6 +100,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let settings = NyxSettings::builder()
         .cpu_id(cpu_id)
         .parent_cpu_id(None)
+        .input_buffer_size(NYX_INPUT_BUFFER_SIZE)
         .timeout_secs(timeout_secs)
         .workdir_path(Cow::Owned(workdir.to_string_lossy().into_owned()))
         .build();
@@ -144,8 +145,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    let stage = AtroposStage::new(
-        AtroposMutator::new(operations),
+    let stage = DeterministicStage::new(
+        DeterministicMutator::new(operations)?,
         LlmAgent::new(LlmConfig::from_env()),
     );
     let mut stages = tuple_list!(stage);

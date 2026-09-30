@@ -1,7 +1,7 @@
 use std::{env, path::PathBuf, thread, time::Duration};
 
 use libafl::{
-    corpus::{Corpus, CorpusId},
+    corpus::{Corpus, CorpusId, HasCurrentCorpusId},
     executors::{ExitKind, HasTimeout, SetTimeout},
     fuzzer::{Evaluator, ExecutesInput},
     mutators::Mutator,
@@ -14,7 +14,7 @@ use serde::Deserialize;
 use crate::{
     coverage_report::{QueueCoverageCollector, QueueCoverageReport, QueueInputSummary},
     input::HttpInput,
-    mutate::AtroposMutator,
+    mutate::DeterministicMutator,
 };
 
 const MAX_REQUESTS_PER_SESSION: usize = 32;
@@ -128,11 +128,11 @@ impl LlmAgent {
         executor: &mut E,
         state: &mut S,
         manager: &mut EM,
-        havoc: &mut AtroposMutator,
+        havoc: &mut DeterministicMutator,
     ) -> Result<(), Error>
     where
         E: HasTimeout + SetTimeout,
-        S: HasRand + HasCorpus<HttpInput>,
+        S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
         Z: ExecutesInput<E, EM, HttpInput, S> + Evaluator<E, EM, HttpInput, S>,
     {
         // An unsuccessful attempt must not trigger a full corpus replay on

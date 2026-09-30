@@ -2,6 +2,9 @@ use libafl::inputs::{HasTargetBytes, Input};
 use libafl_bolts::ownedref::OwnedSlice;
 use serde::{Deserialize, Serialize};
 
+/// Keep the Nyx input buffer and structured-mutator limit in sync.
+pub const NYX_INPUT_BUFFER_SIZE: usize = 1024 * 1024;
+
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
 pub enum JsonValue {
     Null,
@@ -68,30 +71,59 @@ impl JsonValue {
         }
     }
 
-    pub fn string_paths(&self) -> Vec<Vec<usize>> {
+    /// Returns paths to this value and all of its descendants.
+    pub fn value_paths(&self) -> Vec<Vec<usize>> {
         let mut out = Vec::new();
-        self.collect_strings(&mut Vec::new(), &mut out);
+        self.collect_values(&mut Vec::new(), &mut out);
         out
     }
 
-    fn collect_strings(&self, prefix: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+    fn collect_values(&self, prefix: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        out.push(prefix.clone());
         match self {
-            Self::String(_) | Self::Number(_) => out.push(prefix.clone()),
             Self::Array(items) => {
                 for (index, item) in items.iter().enumerate() {
                     prefix.push(index);
-                    item.collect_strings(prefix, out);
+                    item.collect_values(prefix, out);
                     prefix.pop();
                 }
             }
             Self::Object(fields) => {
                 for (index, (_, value)) in fields.iter().enumerate() {
                     prefix.push(index);
-                    value.collect_strings(prefix, out);
+                    value.collect_values(prefix, out);
                     prefix.pop();
                 }
             }
-            _ => {}
+            Self::Null | Self::Bool(_) | Self::Number(_) | Self::String(_) => {}
+        }
+    }
+
+    /// Returns paths to all arrays in this value tree.
+    pub fn array_paths(&self) -> Vec<Vec<usize>> {
+        let mut out = Vec::new();
+        self.collect_arrays(&mut Vec::new(), &mut out);
+        out
+    }
+
+    fn collect_arrays(&self, prefix: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        match self {
+            Self::Array(items) => {
+                out.push(prefix.clone());
+                for (index, item) in items.iter().enumerate() {
+                    prefix.push(index);
+                    item.collect_arrays(prefix, out);
+                    prefix.pop();
+                }
+            }
+            Self::Object(fields) => {
+                for (index, (_, value)) in fields.iter().enumerate() {
+                    prefix.push(index);
+                    value.collect_arrays(prefix, out);
+                    prefix.pop();
+                }
+            }
+            Self::Null | Self::Bool(_) | Self::Number(_) | Self::String(_) => {}
         }
     }
 
@@ -149,6 +181,13 @@ impl JsonValue {
     pub fn object_fields_mut(&mut self, path: &[usize]) -> Option<&mut Vec<(String, JsonValue)>> {
         match self.leaf_mut(path)? {
             Self::Object(fields) => Some(fields),
+            _ => None,
+        }
+    }
+
+    pub fn array_items_mut(&mut self, path: &[usize]) -> Option<&mut Vec<JsonValue>> {
+        match self.leaf_mut(path)? {
+            Self::Array(items) => Some(items),
             _ => None,
         }
     }
@@ -348,5 +387,42 @@ mod tests {
         let body = String::from_utf8(seed.body_bytes()).unwrap();
         assert!(body.contains("\"requests\""));
         assert!(body.contains("seed"));
+    }
+
+    #[test]
+    fn value_paths_include_root_and_nested_nodes() {
+        let value = JsonValue::Object(vec![(
+            "items".to_string(),
+            JsonValue::Array(vec![
+                JsonValue::String(b"first".to_vec()),
+                JsonValue::Object(vec![("enabled".to_string(), JsonValue::Bool(true))]),
+            ]),
+        )]);
+
+        assert_eq!(
+            value.value_paths(),
+            vec![vec![], vec![0], vec![0, 0], vec![0, 1], vec![0, 1, 0]]
+        );
+    }
+
+    #[test]
+    fn array_paths_and_mutable_items_reach_nested_arrays() {
+        let mut value = JsonValue::Object(vec![(
+            "items".to_string(),
+            JsonValue::Array(vec![JsonValue::Array(vec![JsonValue::Null])]),
+        )]);
+
+        assert_eq!(value.array_paths(), vec![vec![0], vec![0, 0]]);
+        value
+            .array_items_mut(&[0, 0])
+            .unwrap()
+            .push(JsonValue::Bool(true));
+        assert_eq!(
+            value.leaf_ref(&[0, 0]),
+            Some(&JsonValue::Array(vec![
+                JsonValue::Null,
+                JsonValue::Bool(true)
+            ]))
+        );
     }
 }

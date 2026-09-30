@@ -19,13 +19,22 @@ BUNDLE_DIR="$DATA_DIR/bundle"
 
 for path in "$ARTIFACT_DIR/nyx-php-runtime.tar.gz" "$ARTIFACT_DIR/php-code-coverage-runtime" \
 	"$ARTIFACT_DIR/atropos-agent-phpcov-runtime" "$ARTIFACT_DIR/atropos_agent" \
+	"$ARTIFACT_DIR/php-cli" "$ARTIFACT_DIR/atropos_shm.so" "$ARTIFACT_DIR/atropos-nyx-bootstrap.php" \
 	"$WP_ROOT/index.php" "$WP_ROOT/wp-config.php" "$SECRET_FILE" \
 	"$LEGACY_ROOT/fuzzer/nyx.h" "$SCRIPT_DIR/nyx-guest-launch.sh"; do
 	if [[ ! -e "$path" ]]; then
 		printf 'Required Nyx guest input is missing: %s\n' "$path" >&2
 		exit 1
 	fi
-done
+	done
+if [[ "$(cat "$ARTIFACT_DIR/atropos-agent-phpcov-runtime")" != nyx-agent-cli-shm-v2 ]]; then
+	printf 'The Nyx guest agent was built for the old FastCGI protocol; rerun scripts/build-nyx-php.sh.\n' >&2
+	exit 1
+fi
+if [[ "$(cat "$ARTIFACT_DIR/php-code-coverage-runtime")" != php-code-coverage-9.2.31+phpcov-8.2.1+atropos-shm-v2 ]]; then
+	printf 'The PHP runtime was built for the old FastCGI protocol; rerun scripts/build-nyx-php.sh.\n' >&2
+	exit 1
+fi
 if ! command -v mariadb-dump >/dev/null 2>&1; then
 	printf 'mariadb-dump is unavailable; run this script through scripts/with-nyx-build-deps.sh\n' >&2
 	exit 1
@@ -34,6 +43,24 @@ if ! systemctl --user is-active --quiet atropos-libafl-mariadb.service; then
 	printf 'The local Atropos MariaDB service is not active; run scripts/setup-wordpress.sh first\n' >&2
 	exit 1
 fi
+
+python3 - "$WP_ROOT/wp-config.php" "$WP_ROOT/wp-content" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+config = Path(sys.argv[1]).read_text()
+content = Path(sys.argv[2])
+request_inputs = re.compile(r"\$_(?:SERVER|GET|POST|REQUEST|COOKIE)\b")
+if request_inputs.search(config):
+    raise SystemExit("wp-config.php reads per-request superglobals before the Nyx checkpoint")
+if re.search(r"define\s*\(\s*['\"]MULTISITE['\"]\s*,\s*(?:true|1)\b", config, re.I):
+    raise SystemExit("the Nyx pre-plugin checkpoint currently supports single-site WordPress only")
+dropins = ["advanced-cache.php", "db.php", "object-cache.php", "maintenance.php", "sunrise.php"]
+present = [name for name in dropins if (content / name).exists()]
+if present:
+    raise SystemExit("request-sensitive pre-checkpoint drop-ins are unsupported: " + ", ".join(present))
+PY
 
 set -a
 # This file is generated locally by setup-wordpress.sh and contains validated hex credentials.
@@ -107,6 +134,25 @@ data = data.replace("127.0.0.1:33060", "127.0.0.1")
 path.write_text(data)
 PY
 fi
+python3 - "$BUNDLE_DIR/wordpress/wp-settings.php" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text()
+marker = "/* Atropos Nyx per-request checkpoint v1. */"
+hook = "// Load must-use plugins."
+if marker in source:
+    raise SystemExit(f"the guest WordPress tree is already patched: {path}")
+if source.count(hook) != 1:
+    raise SystemExit(f"could not find a unique MU-plugin checkpoint in {path}")
+source = source.replace(
+    hook,
+    marker + "\nif ( function_exists( 'atropos_nyx_bootstrap_request' ) ) {\n"
+    "\tatropos_nyx_bootstrap_request();\n}\n\n" + hook,
+)
+path.write_text(source)
+PY
 
 cat >"$BUNDLE_DIR/install-guest.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -123,6 +169,7 @@ if [[ ! "$MARIADB_DATABASE" =~ ^[A-Za-z0-9_]+$ || ! "$MARIADB_USER" =~ ^[A-Za-z0
 fi
 
 mkdir -p /var/www/html
+find /var/www/html -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 cp -a wordpress/. /var/www/html/
 chown -R www-data:www-data /var/www/html
 install -d -o root -g root -m 0700 /usr/local/lib/atropos-nyx-db
@@ -216,8 +263,11 @@ cp -- atropos-nyx-launch /usr/local/bin/atropos-nyx-launch
 chmod 0755 /usr/local/bin/atropos_agent \
 	/usr/local/bin/atropos-nyx-preimage /usr/local/bin/atropos-nyx-launch \
 	/usr/local/lib/atropos-nyx-php/target_executable \
+	/usr/local/lib/atropos-nyx-php/php-cli \
 	/usr/local/lib/atropos-nyx-php/pcov.so
 chmod 0644 /usr/local/lib/atropos-nyx-php/php.ini
+chmod 0644 /usr/local/lib/atropos-nyx-php/atropos_shm.so \
+	/usr/local/lib/atropos-nyx-php/atropos-nyx-bootstrap.php
 if [[ -f /usr/local/lib/atropos-nyx-php/opcache.so ]]; then
 	chmod 0644 /usr/local/lib/atropos-nyx-php/opcache.so
 fi

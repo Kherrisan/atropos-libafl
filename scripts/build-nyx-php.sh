@@ -20,6 +20,7 @@ fi
 BUILD_TMPDIR="${ATROPOS_BUILD_TMPDIR:-${TMPDIR:-/tmp}}"
 BUILD_ROOT="$(mktemp -d "$BUILD_TMPDIR/atropos-nyx-php.XXXXXX")"
 JOBS="${JOBS:-$(getconf _NPROCESSORS_ONLN)}"
+REUSE_PHP_BUILD=0
 REUSE_RUNTIME_ARTIFACTS=0
 
 cleanup() {
@@ -32,7 +33,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for dependency in autoconf make patch lddtree nim nimble curl; do
+for dependency in autoconf make patch lddtree nim curl; do
 	if ! command -v "$dependency" >/dev/null 2>&1; then
 		printf 'Missing build command: %s\n' "$dependency" >&2
 		exit 1
@@ -53,24 +54,35 @@ rm -f -- "$ARTIFACT_DIR/php-code-coverage-runtime"
 rm -f -- "$ARTIFACT_DIR/atropos-agent-phpcov-runtime"
 if [[ "${ATROPOS_NYX_REUSE_PHP:-0}" == 1 ]]; then
 	PHP_CGI="$PHP_PREFIX/bin/php-cgi"
+	PHP_CLI="$PHP_PREFIX/bin/php"
 	PCOV_SO="$(find "$PHP_PREFIX" -type f -name pcov.so -print -quit)"
 	OPCACHE_SO="$(find "$PHP_PREFIX" -type f -name opcache.so -print -quit)"
-	if [[ ! -x "$PHP_CGI" || -z "$PCOV_SO" ]]; then
+	ATROPOS_SHM_SO="$ARTIFACT_DIR/atropos_shm.so"
+	if [[ -x "$PHP_CGI" && -x "$PHP_CLI" && -n "$PCOV_SO" && -n "$OPCACHE_SO" ]]; then
+		REUSE_PHP_BUILD=1
+	else
 		PHP_CGI="$ARTIFACT_DIR/target_executable"
+		PHP_CLI="$ARTIFACT_DIR/php-cli"
 		PCOV_SO="$ARTIFACT_DIR/pcov.so"
 		OPCACHE_SO="$ARTIFACT_DIR/opcache.so"
-		if [[ ! -x "$PHP_CGI" || ! -f "$PCOV_SO" || ! -f "$OPCACHE_SO" ]]; then
+		if [[ ! -x "$PHP_CGI" || ! -x "$PHP_CLI" || ! -f "$PCOV_SO" || ! -f "$OPCACHE_SO" || ! -f "$ATROPOS_SHM_SO" ]]; then
 			printf 'ATROPOS_NYX_REUSE_PHP=1 requires the PHP/PCOV runtime under %s or %s\n' \
 				"$PHP_PREFIX" "$ARTIFACT_DIR" >&2
 			exit 1
 		fi
 		REUSE_RUNTIME_ARTIFACTS=1
 	fi
-else
-	mkdir -p "$BUILD_ROOT/php-src" "$BUILD_ROOT/pcov-src"
-	tar --exclude=.git -C "$PHP_SOURCE" -cf - . | tar -C "$BUILD_ROOT/php-src" -xf -
-	tar --exclude=.git -C "$PCOV_SOURCE" -cf - . | tar -C "$BUILD_ROOT/pcov-src" -xf -
+fi
 
+if [[ "$REUSE_RUNTIME_ARTIFACTS" != 1 ]]; then
+	mkdir -p "$BUILD_ROOT/pcov-src"
+	tar --exclude=.git -C "$PCOV_SOURCE" -cf - . | tar -C "$BUILD_ROOT/pcov-src" -xf -
+	if [[ "$REUSE_PHP_BUILD" != 1 ]]; then
+		mkdir -p "$BUILD_ROOT/php-src"
+		tar --exclude=.git -C "$PHP_SOURCE" -cf - . | tar -C "$BUILD_ROOT/php-src" -xf -
+	fi
+
+	if [[ "$REUSE_PHP_BUILD" != 1 ]]; then
 	BZIP2_OPTION=--with-bz2
 	OPENSSL_OPTION=--with-openssl
 	if [[ -n "${ATROPOS_NIX_BZIP2_DEV:-}" && -n "${ATROPOS_NIX_BZIP2_LIB:-}" ]]; then
@@ -180,16 +192,64 @@ if ! make -j"$JOBS" >"$BUILD_ROOT/php-build.log" 2>&1; then
 	tail -n 30 "$BUILD_ROOT/php-build.log" >&2
 	exit 1
 fi
-make install
-mkdir -p "$PHP_PREFIX/lib"
-cp php.ini-development "$PHP_PREFIX/lib/php.ini"
+	make install
+	mkdir -p "$PHP_PREFIX/lib"
+	cp php.ini-development "$PHP_PREFIX/lib/php.ini"
+	fi
 
-export PATH="$PHP_PREFIX/bin:$PATH"
+	export PATH="$PHP_PREFIX/bin:$PATH"
 if ! command -v phpize >/dev/null 2>&1; then
 	printf 'phpize was not installed under %s\n' "$PHP_PREFIX" >&2
 	exit 1
 fi
 cd "$BUILD_ROOT/pcov-src"
+python3 - "$BUILD_ROOT/pcov-src/pcov.c" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+source = path.read_text()
+anchor = "const zend_function_entry php_pcov_functions[] = {"
+implementation = '''ZEND_BEGIN_ARG_INFO_EX(php_pcov_toggle_arginfo, 0, 0, 1)
+\tZEND_ARG_INFO(0, enabled)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_INFO_EX(php_pcov_limit_arginfo, 0, 0, 1)
+\tZEND_ARG_INFO(0, limit)
+ZEND_END_ARG_INFO()
+
+PHP_NAMED_FUNCTION(php_pcov_set_coverage_dump_enabled)
+{
+\tzend_bool enabled;
+\tZEND_PARSE_PARAMETERS_START(1, 1)
+\t\tZ_PARAM_BOOL(enabled)
+\tZEND_PARSE_PARAMETERS_END();
+\tcoverage_dump_enabled = enabled;
+\tRETURN_TRUE;
+}
+
+PHP_NAMED_FUNCTION(php_pcov_set_execution_limit)
+{
+\tzend_long limit;
+\tZEND_PARSE_PARAMETERS_START(1, 1)
+\t\tZ_PARAM_LONG(limit)
+\tZEND_PARSE_PARAMETERS_END();
+\tif (limit < 0) {
+\t\tlimit = 0;
+\t}
+\texecution_limit = (uint32_t)limit;
+\texecuted_opcodes = 0;
+\tRETURN_TRUE;
+}
+
+'''
+if source.count(anchor) != 1:
+    raise SystemExit("could not locate the PCOV function table for Nyx runtime toggles")
+source = source.replace(anchor, implementation + anchor)
+entry = '\tZEND_NS_FENTRY("pcov", set_coverage_dump_enabled, php_pcov_set_coverage_dump_enabled, php_pcov_toggle_arginfo, 0)\n\tZEND_NS_FENTRY("pcov", set_execution_limit, php_pcov_set_execution_limit, php_pcov_limit_arginfo, 0)\n'
+source = source.replace(anchor + "\n", anchor + "\n" + entry, 1)
+path.write_text(source)
+PY
 phpize
 ./configure --with-php-config="$PHP_PREFIX/bin/php-config"
 if ! make -j"$JOBS" >"$BUILD_ROOT/pcov-build.log" 2>&1; then
@@ -198,11 +258,37 @@ if ! make -j"$JOBS" >"$BUILD_ROOT/pcov-build.log" 2>&1; then
 	exit 1
 fi
 make install
+
+ATROPOS_EXT_SOURCE="$BUILD_ROOT/atropos-shm-ext"
+mkdir -p "$ATROPOS_EXT_SOURCE"
+cp -- "$REPO_ROOT/guest/php-ext/config.m4" "$REPO_ROOT/guest/php-ext/atropos_shm.c" \
+	"$REPO_ROOT/guest/atropos_shared.h" "$ATROPOS_EXT_SOURCE/"
+cd "$ATROPOS_EXT_SOURCE"
+phpize
+./configure --with-php-config="$PHP_PREFIX/bin/php-config"
+if ! make -j"$JOBS" >"$BUILD_ROOT/atropos-shm-build.log" 2>&1; then
+	grep -n -B 3 -A 3 -E 'error:|undefined reference|^make: \*\*\*' "$BUILD_ROOT/atropos-shm-build.log" | tail -n 100 >&2 || true
+	tail -n 30 "$BUILD_ROOT/atropos-shm-build.log" >&2
+	exit 1
+fi
+make install
 fi
 
 PHP_CLI="$PHP_PREFIX/bin/php"
+ATROPOS_SHM_SO="$(find "$PHP_PREFIX" -type f -name atropos_shm.so -print -quit)"
 if [[ ! -x "$PHP_CLI" ]]; then
-	printf 'PHP CLI is required to install PHP_CodeCoverage under %s\n' "$PHP_PREFIX" >&2
+	if [[ -x "$ARTIFACT_DIR/php-cli" ]]; then
+		PHP_CLI="$ARTIFACT_DIR/php-cli"
+	else
+		printf 'PHP CLI is required to install PHP_CodeCoverage under %s\n' "$PHP_PREFIX" >&2
+		exit 1
+	fi
+fi
+if [[ -f "$ARTIFACT_DIR/atropos_shm.so" ]]; then
+	ATROPOS_SHM_SO="$ARTIFACT_DIR/atropos_shm.so"
+fi
+if [[ ! -f "$ATROPOS_SHM_SO" ]]; then
+	printf 'Atropos shared-memory PHP extension is missing under %s\n' "$PHP_PREFIX" >&2
 	exit 1
 fi
 export PATH="$PHP_PREFIX/bin:$PATH"
@@ -222,20 +308,27 @@ COMPOSER_MEMORY_LIMIT=-1 \
 		--prefer-dist --no-interaction --classmap-authoritative
 cp -- "$COVERAGE_TOOLS_DIR/auto-prepend.php" "$ARTIFACT_DIR/atropos-coverage-auto-prepend.php"
 cp -- "$COVERAGE_TOOLS_DIR/auto-append.php" "$ARTIFACT_DIR/atropos-coverage-auto-append.php"
+cp -- "$REPO_ROOT/guest/atropos-nyx-bootstrap.php" "$ARTIFACT_DIR/atropos-nyx-bootstrap.php"
 
 export CC="${ATROPOS_NYX_NIM_CC:-/usr/bin/gcc}"
 export CXX="${ATROPOS_NYX_NIM_CXX:-/usr/bin/g++}"
 
 if [[ "$REUSE_RUNTIME_ARTIFACTS" != 1 ]]; then
 	PHP_CGI="$PHP_PREFIX/bin/php-cgi"
+	PHP_CLI="$PHP_PREFIX/bin/php"
 	if [[ ! -x "$PHP_CGI" ]]; then
 		PHP_CGI="$BUILD_ROOT/php-src/sapi/cgi/php-cgi"
 	fi
 	PCOV_SO="$(find "$PHP_PREFIX" -type f -name pcov.so -print -quit)"
 	OPCACHE_SO="$(find "$PHP_PREFIX" -type f -name opcache.so -print -quit)"
+	ATROPOS_SHM_SO="$(find "$PHP_PREFIX" -type f -name atropos_shm.so -print -quit)"
 fi
 if [[ ! -x "$PHP_CGI" ]]; then
 	printf 'PHP CGI SAPI was not built under %s\n' "$PHP_PREFIX" >&2
+	exit 1
+fi
+if [[ ! -x "$PHP_CLI" ]]; then
+	printf 'PHP CLI SAPI was not built under %s\n' "$PHP_PREFIX" >&2
 	exit 1
 fi
 if [[ -z "$PCOV_SO" ]]; then
@@ -246,15 +339,25 @@ if [[ -z "$OPCACHE_SO" || ! -f "$OPCACHE_SO" ]]; then
 	printf 'OPcache extension was not installed under %s\n' "$PHP_PREFIX" >&2
 	exit 1
 fi
+if [[ -z "$ATROPOS_SHM_SO" || ! -f "$ATROPOS_SHM_SO" ]]; then
+	printf 'Atropos shared-memory PHP extension was not installed under %s\n' "$PHP_PREFIX" >&2
+	exit 1
+fi
 
 if [[ "$PHP_CGI" != "$ARTIFACT_DIR/target_executable" ]]; then
 	cp --remove-destination -- "$PHP_CGI" "$ARTIFACT_DIR/target_executable"
+fi
+if [[ "$PHP_CLI" != "$ARTIFACT_DIR/php-cli" ]]; then
+	cp --remove-destination -- "$PHP_CLI" "$ARTIFACT_DIR/php-cli"
 fi
 if [[ "$PCOV_SO" != "$ARTIFACT_DIR/pcov.so" ]]; then
 	cp --remove-destination -- "$PCOV_SO" "$ARTIFACT_DIR/pcov.so"
 fi
 if [[ "$OPCACHE_SO" != "$ARTIFACT_DIR/opcache.so" ]]; then
 	cp --remove-destination -- "$OPCACHE_SO" "$ARTIFACT_DIR/opcache.so"
+fi
+if [[ "$ATROPOS_SHM_SO" != "$ARTIFACT_DIR/atropos_shm.so" ]]; then
+	cp --remove-destination -- "$ATROPOS_SHM_SO" "$ARTIFACT_DIR/atropos_shm.so"
 fi
 cat >"$ARTIFACT_DIR/php.ini" <<'EOF'
 display_errors=Off
@@ -264,12 +367,13 @@ date.timezone=UTC
 extension_dir=/tmp
 zend_extension=/tmp/opcache.so
 extension=pcov.so
+extension=atropos_shm.so
 pcov.enabled=1
 pcov.directory=/var/www/html
 memory_limit=512M
-auto_prepend_file=/tmp/atropos-coverage-auto-prepend.php
-auto_append_file=/tmp/atropos-coverage-auto-append.php
+auto_prepend_file=/tmp/atropos-nyx-bootstrap.php
 opcache.enable=1
+opcache.enable_cli=1
 opcache.memory_consumption=256
 opcache.interned_strings_buffer=16
 opcache.max_accelerated_files=50000
@@ -277,7 +381,7 @@ opcache.validate_timestamps=0
 opcache.file_update_protection=0
 EOF
 
-for executable in "$PHP_CGI" "$PCOV_SO" "$OPCACHE_SO"; do
+for executable in "$PHP_CGI" "$PHP_CLI" "$PCOV_SO" "$OPCACHE_SO" "$ATROPOS_SHM_SO"; do
 	while IFS= read -r dependency; do
 		[[ -f "$dependency" ]] || continue
 		cp --remove-destination -L -- "$dependency" "$ARTIFACT_DIR/lib/$(basename -- "$dependency")"
@@ -285,231 +389,29 @@ for executable in "$PHP_CGI" "$PCOV_SO" "$OPCACHE_SO"; do
 done
 
 if [[ "${ATROPOS_NYX_SKIP_AGENT:-0}" != 1 ]]; then
-	NIMBLE_DIR="${ATROPOS_NYX_NIMBLE_DIR:-$BUILD_ROOT/nimble}"
-	mkdir -p "$NIMBLE_DIR"
-	if ! find "$NIMBLE_DIR/pkgs" -path '*/fastcgi/client.nim' -print -quit 2>/dev/null | rg -q .; then
-		nimble --nimbleDir:"$NIMBLE_DIR" install -y \
-			https://github.com/egueler/fastcgi.nim-patched.git
-	fi
-	FASTCGI_MODULE="$(find "$NIMBLE_DIR/pkgs" -path '*/fastcgi/client.nim' -print -quit)"
-	if [[ -z "$FASTCGI_MODULE" ]]; then
-		printf 'The patched FastCGI Nim package did not install under %s\n' "$NIMBLE_DIR" >&2
-		exit 1
-	fi
-	FASTCGI_PATH="${FASTCGI_MODULE%/fastcgi/client.nim}"
 	AGENT_SOURCE="$BUILD_ROOT/agent-src"
 	mkdir -p "$AGENT_SOURCE"
-	for source in atropos_agent.nim nyx.c nyx.h; do
-		cp -- "$LEGACY_ROOT/fuzzer/$source" "$AGENT_SOURCE/$source"
-	done
-	python3 - "$AGENT_SOURCE/nyx.c" "$AGENT_SOURCE/atropos_agent.nim" <<'PY'
+	cp -- "$REPO_ROOT/guest/atropos_agent.nim" "$REPO_ROOT/guest/atropos_request_shm.c" \
+		"$REPO_ROOT/guest/atropos_shared.h" "$LEGACY_ROOT/fuzzer/nyx.c" \
+		"$LEGACY_ROOT/fuzzer/nyx.h" "$AGENT_SOURCE/"
+	python3 - "$AGENT_SOURCE/nyx.c" <<'PYTHON'
 from pathlib import Path
 import sys
 
-nyx_c, agent_nim = map(Path, sys.argv[1:])
-c_source = nyx_c.read_text()
-c_anchor = "        kAFL_hypercall(HYPERCALL_KAFL_GET_PAYLOAD, (uintptr_t)payload_buffer);\n"
-if c_source.count(c_anchor) != 1:
-    raise SystemExit("could not locate the Nyx agent configuration anchor")
-c_source = c_source.replace(c_anchor, c_anchor + "        done = true;\n")
-coverage_dump_anchor = "void nyx_hprintf(char* buf) {"
-coverage_dump_function = '''void nyx_coverage_dump(char* buffer, uint32_t len, uint32_t pinned_core, uint8_t kind) {
-    static bool initialized[2] = {false, false};
-    static char filenames[2][64];
-    static kafl_dump_file_t objects[2] = {{0}};
-
-    if (kind > 1 || len == 0) {
-        return;
-    }
-    if (!initialized[kind]) {
-        snprintf(filenames[kind], sizeof(filenames[kind]),
-                 kind == 0 ? "coverage_cobertura_%u" : "coverage_php_%u",
-                 pinned_core);
-        objects[kind].file_name_str_ptr = (uintptr_t)filenames[kind];
-        objects[kind].append = 0;
-        objects[kind].bytes = 0;
-        kAFL_hypercall(HYPERCALL_KAFL_DUMP_FILE, (uintptr_t)&objects[kind]);
-        initialized[kind] = true;
-    }
-    objects[kind].append = 1;
-    objects[kind].bytes = len;
-    objects[kind].data_ptr = (uintptr_t)buffer;
-    kAFL_hypercall(HYPERCALL_KAFL_DUMP_FILE, (uintptr_t)&objects[kind]);
-}
-
-'''
-if c_source.count(coverage_dump_anchor) != 1:
-    raise SystemExit("could not locate Nyx dump helper insertion point")
-c_source = c_source.replace(coverage_dump_anchor, coverage_dump_function + coverage_dump_anchor)
-nyx_c.write_text(c_source)
-
-nim_source = agent_nim.read_text()
-payload_anchor = '    let payload: string = fmt"{nyx_get_payload()}"\n'
-if nim_source.count(payload_anchor) != 1:
-    raise SystemExit("could not locate the Nyx payload read")
-nim_source = nim_source.replace(
-    payload_anchor,
-    '    var payload: string = fmt"{nyx_get_payload()}"\n',
-)
-nim_anchor = "    let jsonNode = parseJson(payload)\n"
-nim_replacement = '''    var jsonNode: JsonNode
-    try:
-        jsonNode = parseJson(payload)
-    except CatchableError:
-        # libafl_nyx starts the guest with its `not_init` placeholder buffer.
-        # Release initialization, then acquire the root snapshot expected by
-        # LibAFL before parsing the first real input.
-        nyx_exit()
-        nyx_create_snapshot()
-        nyx_hprintf("LibAFL Nyx bootstrap ready\\n")
-        payload = fmt"{nyx_get_payload()}"
-        try:
-            jsonNode = parseJson(payload)
-        except CatchableError:
-            nyx_exit()
-            quit(0)
-'''
-if nim_source.count(nim_anchor) != 1:
-    raise SystemExit("could not locate the guest input parser")
-nim_source = nim_source.replace(nim_anchor, nim_replacement)
-
-connect_anchor = "        cl.connect()\n"
-connect_replacement = '''        var connected = false
-        for attempt in 0 .. 50:
-            try:
-                cl.connect()
-                connected = true
-                break
-            except CatchableError:
-                sleep(100)
-        if not connected:
-            nyx_hprintf("FastCGI socket connection failed\\n")
-            nyx_exit()
-            quit(0)
-'''
-if nim_source.count(connect_anchor) != 1:
-    raise SystemExit("could not locate the FastCGI connect call")
-nim_source = nim_source.replace(connect_anchor, connect_replacement)
-preload_connect_anchor = "    cl2.connect()\n"
-preload_connect_replacement = '''    var preloadConnected = false
-    for attempt in 0 .. 50:
-        try:
-            cl2.connect()
-            preloadConnected = true
-            break
-        except CatchableError:
-            sleep(100)
-    if not preloadConnected:
-        nyx_hprintf("FastCGI socket unavailable during WordPress preload\\n")
-        break
-'''
-if nim_source.count(preload_connect_anchor) != 1:
-    raise SystemExit("could not locate the WordPress preload FastCGI connection")
-nim_source = nim_source.replace(preload_connect_anchor, preload_connect_replacement)
-cgi_command_anchor = "/tmp/target_executable -b /tmp/php.sock -c /tmp/php.ini &"
-if nim_source.count(cgi_command_anchor) != 1:
-    raise SystemExit("could not locate the PHP-CGI launch command")
-nim_source = nim_source.replace(
-    cgi_command_anchor,
-    "/tmp/target_executable -b /tmp/php.sock -c /tmp/php.ini >/tmp/php-cgi.log 2>&1 &",
-)
-startup_markers = [
-    (
-        "nyx_init()\n",
-        'nyx_init()\n'
-        'nyx_hprintf("agent Nyx initialization complete\\n")\n',
-    ),
-    (
-        'discard execCmd("chown -R mysql:mysql /var/lib/mysql /var/run/mysqld; service mysql restart") #mysqld --innodb-thread-sleep-delay=0 & ")\n',
-        'nyx_hprintf("MariaDB already initialized in the Nyx preimage\\n")\n',
-    ),
-    (
-        "start_php_interpreter(true) # without bug oracles for preloading\n",
-        '''start_php_interpreter(true) # without bug oracles for preloading
-nyx_hprintf("PHP-CGI launch returned\\n")
-if not fileExists("/tmp/php.sock"):
-    nyx_hprintf("PHP-CGI socket missing after startup\\n")
-    if fileExists("/tmp/php-cgi.log"):
-        let phpCgiLog = readFile("/tmp/php-cgi.log")
-        if phpCgiLog.len > 0:
-            nyx_hprintf(phpCgiLog.cstring)
-''',
-    ),
-    (
-        "sleep(2000)\n\n# enable bug oracle reporting after cache is loaded",
-        'sleep(2000)\n'
-        'nyx_hprintf("WordPress preload complete\\n")\n\n'
-        '# enable bug oracle reporting after cache is loaded',
-    ),
-]
-for startup_anchor, startup_replacement in startup_markers:
-    if nim_source.count(startup_anchor) != 1:
-        raise SystemExit(f"could not locate guest startup marker anchor: {startup_anchor[:48]!r}")
-    nim_source = nim_source.replace(startup_anchor, startup_replacement)
-import_anchor = "proc nyx_init(): void {.importc.}\n"
-if nim_source.count(import_anchor) != 1:
-    raise SystemExit("could not locate the Nyx agent imports")
-nim_source = nim_source.replace(
-    import_anchor,
-    "proc nyx_hprintf(msg: cstring): void {.importc.}\n"
-    "proc nyx_coverage_dump(buffer: cstring, len: uint32, pinned_core: uint32, kind: uint8): void {.importc.}\n"
-    + import_anchor,
-)
-
-coverage_state_anchor = "    var html_dump_mode = false\n"
-if nim_source.count(coverage_state_anchor) != 1:
-    raise SystemExit("could not locate coverage mode variables")
-nim_source = nim_source.replace(
-    coverage_state_anchor,
-    coverage_state_anchor + "    var coverage_dump_mode = false\n    var coverage_core = 0\n",
-)
-coverage_marker_old = '            writeFile("/tmp/coverage_dump_enabled", config[key].getStr()&chr(0x00))\n'
-coverage_marker_new = (
-    '            coverage_dump_mode = true\n'
-    '            coverage_core = parseInt(config[key].getStr())\n'
-    '            writeFile("/tmp/atropos-php-coverage-enabled", config[key].getStr()&chr(0x00))\n'
-)
-if nim_source.count(coverage_marker_old) != 1:
-    raise SystemExit("could not locate the guest PHP coverage marker")
-nim_source = nim_source.replace(coverage_marker_old, coverage_marker_new)
-
-coverage_export_anchor = "    report_crashes_if_necessary(crash_log)\n\nnyx_exit()"
-coverage_export = '''    if coverage_dump_mode:
-        let reportDirectory = "/tmp/atropos-php-coverage"
-        let coberturaPath = reportDirectory & "/current.cobertura.xml"
-        let serializedPath = reportDirectory & "/current.cov"
-        if fileExists(coberturaPath):
-            let cobertura = readFile(coberturaPath)
-            nyx_coverage_dump(cobertura.cstring, uint32(cobertura.len), uint32(coverage_core), 0'u8)
-        else:
-            nyx_hprintf("PHP_CodeCoverage did not create current.cobertura.xml\\n")
-            if fileExists(reportDirectory & "/error.log"):
-                let coverageError = readFile(reportDirectory & "/error.log")
-                nyx_hprintf(coverageError.cstring)
-        if fileExists(serializedPath):
-            let serialized = readFile(serializedPath)
-            nyx_coverage_dump(serialized.cstring, uint32(serialized.len), uint32(coverage_core), 1'u8)
-        else:
-            nyx_hprintf("PHP_CodeCoverage did not create current.cov\\n")
-        if fileExists("/tmp/atropos-php-coverage-enabled"):
-            removeFile("/tmp/atropos-php-coverage-enabled")
-    report_crashes_if_necessary(crash_log)
-
-nyx_exit()'''
-if nim_source.count(coverage_export_anchor) != 1:
-    raise SystemExit("could not locate the end of the guest request loop")
-nim_source = nim_source.replace(coverage_export_anchor, coverage_export)
-agent_nim.write_text(nim_source)
-PY
+path = Path(sys.argv[1])
+source = path.read_text()
+anchor = "        kAFL_hypercall(HYPERCALL_KAFL_GET_PAYLOAD, (uintptr_t)payload_buffer);\n"
+if source.count(anchor) != 1:
+    raise SystemExit("could not locate the Nyx payload initialization anchor")
+path.write_text(source.replace(anchor, anchor + "        done = true;\n"))
+PYTHON
 	(cd "$AGENT_SOURCE" && env -u LD_LIBRARY_PATH nim c \
 		--passC:-B/usr/bin/ --passL:-B/usr/bin/ \
-		--nimblePath:"$NIMBLE_DIR/pkgs" \
-		--path:"$FASTCGI_PATH" \
 		--nimcache:"$BUILD_ROOT/nimcache" \
 		--d:release --opt:speed \
 		--out:"$ARTIFACT_DIR/atropos_agent" \
 		atropos_agent.nim)
-	printf 'nyx-agent-phpcov-v1\n' >"$ARTIFACT_DIR/atropos-agent-phpcov-runtime"
+	printf 'nyx-agent-cli-shm-v2\n' >"$ARTIFACT_DIR/atropos-agent-phpcov-runtime"
 	while IFS= read -r dependency; do
 		[[ -f "$dependency" ]] || continue
 		cp -L -- "$dependency" "$ARTIFACT_DIR/lib/$(basename -- "$dependency")"
@@ -540,6 +442,7 @@ PY
 fi
 
 chmod 0755 "$ARTIFACT_DIR/target_executable"
+chmod 0755 "$ARTIFACT_DIR/php-cli"
 [[ ! -e "$ARTIFACT_DIR/atropos_agent" ]] || chmod 0755 "$ARTIFACT_DIR/atropos_agent"
 env LD_LIBRARY_PATH="$ARTIFACT_DIR/lib" "$ARTIFACT_DIR/target_executable" -n -v
 if ! env LD_LIBRARY_PATH="$ARTIFACT_DIR/lib" "$ARTIFACT_DIR/target_executable" \
@@ -558,9 +461,17 @@ for module in dom libxml xmlwriter; do
 		exit 1
 	fi
 done
+
+if ! env LD_LIBRARY_PATH="$ARTIFACT_DIR/lib" "$ARTIFACT_DIR/php-cli" \
+	-n -d "extension=$ARTIFACT_DIR/pcov.so" -d "extension=$ARTIFACT_DIR/atropos_shm.so" \
+	-r 'exit(function_exists("atropos_request_wait") && function_exists("pcov\\set_coverage_dump_enabled") && function_exists("pcov\\set_execution_limit") ? 0 : 1);'; then
+	printf 'PHP CLI must load the Atropos SHM bridge and Nyx PCOV toggle functions.\n' >&2
+	exit 1
+fi
+
 tar -C "$ARTIFACT_DIR" -czf "$ARTIFACT_DIR/nyx-php-runtime.tar.gz" \
-	target_executable php.ini pcov.so opcache.so lib php-code-coverage \
-	atropos-coverage-auto-prepend.php atropos-coverage-auto-append.php
-printf 'php-code-coverage-9.2.31+phpcov-8.2.1\n' >"$ARTIFACT_DIR/php-code-coverage-runtime"
+	target_executable php-cli php.ini pcov.so opcache.so atropos_shm.so lib php-code-coverage \
+	atropos-coverage-auto-prepend.php atropos-coverage-auto-append.php atropos-nyx-bootstrap.php
+printf 'php-code-coverage-9.2.31+phpcov-8.2.1+atropos-shm-v2\n' >"$ARTIFACT_DIR/php-code-coverage-runtime"
 printf 'Nyx PHP/PCOV runtime: %s\n' "$ARTIFACT_DIR"
 printf 'Host PHP prefix: %s\n' "$PHP_PREFIX"

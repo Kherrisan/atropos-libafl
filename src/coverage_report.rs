@@ -45,6 +45,8 @@ pub struct QueueCoverageCollector {
     serialized_dir: PathBuf,
     cobertura_dump: PathBuf,
     serialized_dump: PathBuf,
+    baseline_cobertura_dump: PathBuf,
+    baseline_serialized_dump: PathBuf,
     saved_ids: Vec<usize>,
 }
 
@@ -88,6 +90,8 @@ impl QueueCoverageCollector {
             serialized_dir,
             cobertura_dump: dump_dir.join(format!("coverage_cobertura_{cpu_id}")),
             serialized_dump: dump_dir.join(format!("coverage_php_{cpu_id}")),
+            baseline_cobertura_dump: dump_dir.join(format!("coverage_baseline_cobertura_{cpu_id}")),
+            baseline_serialized_dump: dump_dir.join(format!("coverage_baseline_php_{cpu_id}")),
             saved_ids: Vec::new(),
         })
     }
@@ -95,13 +99,23 @@ impl QueueCoverageCollector {
     /// Remove fixed Nyx dump names so a failed execution cannot reuse stale data.
     pub fn clear_guest_dumps(&self) -> Result<(), String> {
         remove_if_exists(&self.cobertura_dump)?;
-        remove_if_exists(&self.serialized_dump)
+        remove_if_exists(&self.serialized_dump)?;
+        remove_if_exists(&self.baseline_cobertura_dump)?;
+        remove_if_exists(&self.baseline_serialized_dump)
     }
 
     /// Save this execution's fresh guest reports under a testcase-specific name.
     pub fn collect_case(&mut self, id: usize) -> Result<(), String> {
         let cobertura = read_nonempty(&self.cobertura_dump, "guest Cobertura report")?;
         let serialized = read_nonempty(&self.serialized_dump, "guest PHP_CodeCoverage data")?;
+        let baseline_cobertura = read_nonempty(
+            &self.baseline_cobertura_dump,
+            "guest baseline Cobertura report",
+        )?;
+        let baseline_serialized = read_nonempty(
+            &self.baseline_serialized_dump,
+            "guest baseline PHP_CodeCoverage data",
+        )?;
         write_atomic(
             &self.xml_dir.join(format!("case-{id}.cobertura.xml")),
             &cobertura,
@@ -110,6 +124,24 @@ impl QueueCoverageCollector {
             &self.serialized_dir.join(format!("case-{id}.cov")),
             &serialized,
         )?;
+        if self.saved_ids.is_empty() {
+            write_atomic(
+                &self.xml_dir.join("baseline.cobertura.xml"),
+                &baseline_cobertura,
+            )?;
+            write_atomic(
+                &self.serialized_dir.join("baseline.cov"),
+                &baseline_serialized,
+            )?;
+        } else {
+            let previous_baseline =
+                read_nonempty(&self.serialized_dir.join("baseline.cov"), "saved baseline")?;
+            if previous_baseline != baseline_serialized {
+                return Err(
+                    "guest bootstrap coverage baseline changed during queue scan".to_string(),
+                );
+            }
+        }
         self.saved_ids.push(id);
         Ok(())
     }

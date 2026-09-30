@@ -13,9 +13,9 @@ DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/atropos-l
 VM_DIR="${ATROPOS_NYX_VM_DIR:-$DATA_DIR/vm}"
 BASE_IMAGE="$VM_DIR/noble-server-cloudimg-amd64.img"
 VM_IMAGE="${ATROPOS_NYX_VM_IMAGE:-$VM_DIR/atropos-nyx.qcow2}"
-PAYLOAD_ISO="$VM_DIR/atropos-payload.iso"
-SEED_ISO="$VM_DIR/cloud-init-seed.iso"
-PAYLOAD_DIR="$VM_DIR/payload"
+PAYLOAD_ISO="${ATROPOS_NYX_PAYLOAD_ISO:-$VM_DIR/atropos-payload.iso}"
+SEED_ISO="${ATROPOS_NYX_SEED_ISO:-$VM_DIR/cloud-init-seed.iso}"
+PAYLOAD_DIR="${ATROPOS_NYX_PAYLOAD_DIR:-$VM_DIR/payload}"
 BUNDLE="${ATROPOS_NYX_GUEST_BUNDLE:-$DATA_DIR/bundle/guest-bundle.tar.gz}"
 QEMU_NYX="${ATROPOS_NYX_QEMU:-$REPO_ROOT/target/nyx/QEMU-Nyx/x86_64-softmmu/qemu-system-x86_64}"
 QEMU_TCG="${ATROPOS_NYX_TCG_QEMU:-$(command -v qemu-system-x86_64 || true)}"
@@ -23,6 +23,7 @@ DISK_SIZE_GB="${ATROPOS_NYX_DISK_GB:-32}"
 MEMORY_MB="${ATROPOS_NYX_MEMORY_MB:-8192}"
 CPU_COUNT="${ATROPOS_NYX_BOOT_CPUS:-1}"
 PREIMAGE="${ATROPOS_NYX_PRESNAPSHOT:-$VM_DIR/presnapshot}"
+BUNDLE_CHANGED=0
 
 for command in curl sha256sum awk qemu-img cloud-localds genisoimage timeout; do
 	if ! command -v "$command" >/dev/null 2>&1; then
@@ -42,6 +43,7 @@ if [[ ! -f "$BUNDLE" ]]; then
 	printf 'Nyx guest bundle is missing at %s; build PHP/PCOV and run scripts/package-nyx-guest.sh first\n' "$BUNDLE" >&2
 	exit 1
 fi
+BUNDLE_SHA="$(sha256sum "$BUNDLE" | awk '{print $1}')"
 if [[ ! "$DISK_SIZE_GB" =~ ^[0-9]+$ || "$DISK_SIZE_GB" -lt 24 ]]; then
 	printf 'ATROPOS_NYX_DISK_GB must be an integer of at least 24\n' >&2
 	exit 1
@@ -129,8 +131,13 @@ cloud-localds "$SEED_ISO" "$VM_DIR/user-data" "$VM_DIR/meta-data"
 chmod 600 "$SEED_ISO" "$VM_DIR/user-data" "$VM_DIR/meta-data"
 
 if [[ "${ATROPOS_NYX_SKIP_CLOUD_INIT:-0}" != 1 ]]; then
-	if [[ ! -e "$VM_DIR/cloud-init-complete" ]]; then
-		printf 'Provisioning Ubuntu guest; cloud-init installs MariaDB and imports the local WordPress snapshot.\n'
+	if [[ ! -e "$VM_DIR/cloud-init-complete" || "$(cat "$VM_DIR/cloud-init-complete")" != "$BUNDLE_SHA" ]]; then
+		if [[ -e "$VM_DIR/cloud-init-complete" ]]; then
+			BUNDLE_CHANGED=1
+			printf 'Refreshing the guest because its packaged runtime or WordPress tree changed.\n'
+		else
+			printf 'Provisioning Ubuntu guest; cloud-init installs MariaDB and imports the local WordPress snapshot.\n'
+		fi
 		set +e
 		timeout --signal=TERM 30m "$QEMU_TCG" \
 			-accel tcg -machine pc -cpu qemu64 -smp "$CPU_COUNT" -m "$MEMORY_MB" \
@@ -147,10 +154,19 @@ if [[ "${ATROPOS_NYX_SKIP_CLOUD_INIT:-0}" != 1 ]]; then
 				"$QEMU_STATUS" "$VM_DIR/cloud-init.log" >&2
 			exit 1
 		fi
-		touch "$VM_DIR/cloud-init-complete"
+		printf '%s\n' "$BUNDLE_SHA" >"$VM_DIR/cloud-init-complete"
 		chmod 600 "$VM_DIR/cloud-init-complete"
 	else
-		printf 'Cloud-init is already marked complete at %s\n' "$VM_DIR/cloud-init-complete"
+		printf 'Guest runtime bundle is already installed (%s).\n' "$BUNDLE_SHA"
+	fi
+fi
+
+if [[ "$BUNDLE_CHANGED" == 1 ]]; then
+	rm -f -- "$VM_DIR/preimage-complete"
+	if [[ -d "$PREIMAGE" ]] && find "$PREIMAGE" -mindepth 1 -print -quit | rg -q .; then
+		OLD_PREIMAGE="${PREIMAGE}.before-bundle-$(date +%Y%m%d-%H%M%S)"
+		mv -- "$PREIMAGE" "$OLD_PREIMAGE"
+		printf 'Preserved the previous guest pre-snapshot at %s\n' "$OLD_PREIMAGE"
 	fi
 fi
 

@@ -206,7 +206,52 @@ mod tests {
 
     #[test]
     fn loads_batch_operation() {
-        let ops = load_operations("/home/user/WuppieFuzz/wordpress/openapi.yaml").unwrap();
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "atropos-openapi-test-{}-{timestamp}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+openapi: 3.0.0
+paths:
+  /wp-json/batch/v1:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                validation:
+                  type: string
+                requests:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      method:
+                        type: string
+                      path:
+                        type: string
+                      body:
+                        type: object
+                        properties:
+                          title:
+                            type: string
+                      headers:
+                        type: object
+"#,
+        )
+        .unwrap();
+        let ops = load_operations(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(path).unwrap();
         assert_eq!(ops.len(), 1);
         let input = ops[0].to_input();
         let body = String::from_utf8(input.body_bytes()).unwrap();

@@ -3,29 +3,30 @@ use std::marker::PhantomData;
 
 use libafl::state::HasRand;
 use libafl::{
+    corpus::HasCurrentCorpusId,
     executors::{HasTimeout, SetTimeout},
     fuzzer::Evaluator,
     inputs::Input,
-    mutators::{MutationResult, Mutator},
+    mutators::Mutator,
     stages::{Restartable, Stage},
     state::{HasCorpus, HasCurrentTestcase},
     Error,
 };
 use libafl_bolts::Named;
 
-use crate::{input::HttpInput, llm::LlmAgent, mutate::AtroposMutator};
+use crate::{input::HttpInput, llm::LlmAgent, mutate::DeterministicMutator};
 
-pub struct AtroposStage<E, EM, S, Z> {
+pub struct DeterministicStage<E, EM, S, Z> {
     name: Cow<'static, str>,
-    pub havoc: AtroposMutator,
+    pub havoc: DeterministicMutator,
     pub llm: LlmAgent,
     phantom: PhantomData<(E, EM, S, Z)>,
 }
 
-impl<E, EM, S, Z> AtroposStage<E, EM, S, Z> {
-    pub fn new(havoc: AtroposMutator, llm: LlmAgent) -> Self {
+impl<E, EM, S, Z> DeterministicStage<E, EM, S, Z> {
+    pub fn new(havoc: DeterministicMutator, llm: LlmAgent) -> Self {
         Self {
-            name: Cow::Borrowed("atropos"),
+            name: Cow::Borrowed("deterministic"),
             havoc,
             llm,
             phantom: PhantomData,
@@ -33,13 +34,13 @@ impl<E, EM, S, Z> AtroposStage<E, EM, S, Z> {
     }
 }
 
-impl<E, EM, S, Z> Named for AtroposStage<E, EM, S, Z> {
+impl<E, EM, S, Z> Named for DeterministicStage<E, EM, S, Z> {
     fn name(&self) -> &Cow<'static, str> {
         &self.name
     }
 }
 
-impl<E, EM, S, Z> Restartable<S> for AtroposStage<E, EM, S, Z> {
+impl<E, EM, S, Z> Restartable<S> for DeterministicStage<E, EM, S, Z> {
     fn should_restart(&mut self, _state: &mut S) -> Result<bool, Error> {
         Ok(true)
     }
@@ -49,10 +50,10 @@ impl<E, EM, S, Z> Restartable<S> for AtroposStage<E, EM, S, Z> {
     }
 }
 
-impl<E, EM, S, Z> Stage<E, EM, S, Z> for AtroposStage<E, EM, S, Z>
+impl<E, EM, S, Z> Stage<E, EM, S, Z> for DeterministicStage<E, EM, S, Z>
 where
     E: HasTimeout + SetTimeout,
-    S: HasCorpus<HttpInput> + HasCurrentTestcase<HttpInput> + HasRand,
+    S: HasCorpus<HttpInput> + HasCurrentTestcase<HttpInput> + HasCurrentCorpusId + HasRand,
     Z: Evaluator<E, EM, HttpInput, S> + libafl::fuzzer::ExecutesInput<E, EM, HttpInput, S>,
     HttpInput: Input,
 {
@@ -73,19 +74,18 @@ where
                 .generate_and_run(fuzzer, executor, state, manager, &mut self.havoc);
         }
 
-        let mut input = state.current_input_cloned()?;
-        let mutated = self.havoc.mutate(state, &mut input)?;
-        if mutated == MutationResult::Skipped {
-            return Ok(());
+        let input = state.current_input_cloned()?;
+        let candidates = self.havoc.deterministic_inputs(state, &input)?;
+        for candidate in candidates {
+            let (_, corpus_id) = fuzzer.evaluate_input(state, executor, manager, &candidate)?;
+            self.havoc.post_exec(state, corpus_id)?;
+            self.llm.note(corpus_id);
         }
-        let (_, corpus_id) = fuzzer.evaluate_input(state, executor, manager, &input)?;
-        self.havoc.post_exec(state, corpus_id)?;
-        self.llm.note(corpus_id);
         Ok(())
     }
 }
 
-impl<E, EM, S, Z> AtroposStage<E, EM, S, Z> {
+impl<E, EM, S, Z> DeterministicStage<E, EM, S, Z> {
     fn llm_stall(&self) -> u64 {
         self.llm.execs_since_novel()
     }
