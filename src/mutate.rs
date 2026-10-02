@@ -68,8 +68,13 @@ pub struct DeterministicMutator {
 }
 
 impl DeterministicMutator {
-    pub fn new(operations: Vec<Operation>) -> Result<Self, String> {
-        let dictionary = load_dictionary_from_env()?;
+    pub fn new(operations: Vec<Operation>, seed_tokens: &[String]) -> Result<Self, String> {
+        let mut dictionary = load_dictionary_from_env()?;
+        for token in seed_tokens {
+            if !token.is_empty() && !dictionary.iter().any(|existing| existing == token) {
+                dictionary.push(token.clone());
+            }
+        }
         let key_candidates = collect_key_candidates(&operations, &dictionary);
         let violation_rate = env::var("ATROPOS_SCHEMA_VIOLATION_RATE")
             .ok()
@@ -1194,6 +1199,26 @@ mod tests {
         assert!(mutate_bool_value(&mut state, &mut input));
         assert_eq!(input.body, JsonValue::Bool(false));
         assert!(input.body_override.is_none());
+    }
+
+    #[test]
+    fn seed_tokens_join_the_dictionary_and_key_candidates() {
+        let mutator = DeterministicMutator::new(
+            Vec::new(),
+            &["title".to_string(), "seed".to_string(), "title".to_string()],
+        )
+        .unwrap();
+        assert!(mutator.dictionary.iter().any(|token| token == "title"));
+        assert!(mutator.dictionary.iter().any(|token| token == "seed"));
+        assert_eq!(
+            mutator
+                .dictionary
+                .iter()
+                .filter(|token| token.as_str() == "title")
+                .count(),
+            1
+        );
+        assert!(mutator.key_candidates.iter().any(|token| token == "title"));
     }
 
     #[test]

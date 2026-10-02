@@ -9,7 +9,8 @@ LEGACY_ROOT="${ATROPOS_LEGACY_ROOT:-$(cd -- "$REPO_ROOT/../atropos-legacy" && pw
 PHP_SOURCE="$LEGACY_ROOT/php-7.4-patched"
 PCOV_SOURCE="$LEGACY_ROOT/pcov-patched"
 PHP_PREFIX="${ATROPOS_NYX_PHP_PREFIX:-$HOME/.local/opt/atropos-libafl-nyx-php}"
-ARTIFACT_DIR="${ATROPOS_NYX_GUEST_ARTIFACTS:-${XDG_DATA_HOME:-$HOME/.local/share}/atropos-libafl/nyx/guest}"
+NYX_DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}"
+ARTIFACT_DIR="${ATROPOS_NYX_GUEST_ARTIFACTS:-$NYX_DATA_DIR/guest}"
 COVERAGE_TOOLS_DIR="$REPO_ROOT/coverage-tools"
 
 if [[ "${ATROPOS_NYX_BUILD_SHELL:-0}" != 1 ]]; then
@@ -309,6 +310,7 @@ COMPOSER_MEMORY_LIMIT=-1 \
 cp -- "$COVERAGE_TOOLS_DIR/auto-prepend.php" "$ARTIFACT_DIR/atropos-coverage-auto-prepend.php"
 cp -- "$COVERAGE_TOOLS_DIR/auto-append.php" "$ARTIFACT_DIR/atropos-coverage-auto-append.php"
 cp -- "$REPO_ROOT/guest/atropos-nyx-bootstrap.php" "$ARTIFACT_DIR/atropos-nyx-bootstrap.php"
+cp -- "$REPO_ROOT/guest/atropos-flush-permalinks.php" "$ARTIFACT_DIR/atropos-flush-permalinks.php"
 
 export CC="${ATROPOS_NYX_NIM_CC:-/usr/bin/gcc}"
 export CXX="${ATROPOS_NYX_NIM_CXX:-/usr/bin/g++}"
@@ -403,6 +405,18 @@ source = path.read_text()
 anchor = "        kAFL_hypercall(HYPERCALL_KAFL_GET_PAYLOAD, (uintptr_t)payload_buffer);\n"
 if source.count(anchor) != 1:
     raise SystemExit("could not locate the Nyx payload initialization anchor")
+length_function = """uint32_t nyx_get_payload_len() {
+    return payload_buffer->size - sizeof(payload_buffer->size);
+}"""
+if source.count(length_function) != 1:
+    raise SystemExit("could not locate the legacy Nyx payload-length helper")
+source = source.replace(
+    length_function,
+    """uint32_t nyx_get_payload_len() {
+    /* libnyx stores the input byte count here; it is not the struct size. */
+    return payload_buffer->size;
+}""",
+)
 path.write_text(source.replace(anchor, anchor + "        done = true;\n"))
 PYTHON
 	(cd "$AGENT_SOURCE" && env -u LD_LIBRARY_PATH nim c \
@@ -414,7 +428,7 @@ PYTHON
 	printf 'nyx-agent-cli-shm-v2\n' >"$ARTIFACT_DIR/atropos-agent-phpcov-runtime"
 	while IFS= read -r dependency; do
 		[[ -f "$dependency" ]] || continue
-		cp -L -- "$dependency" "$ARTIFACT_DIR/lib/$(basename -- "$dependency")"
+		cp --remove-destination -L -- "$dependency" "$ARTIFACT_DIR/lib/$(basename -- "$dependency")"
 	done < <(lddtree -l "$ARTIFACT_DIR/atropos_agent")
 fi
 
@@ -471,7 +485,8 @@ fi
 
 tar -C "$ARTIFACT_DIR" -czf "$ARTIFACT_DIR/nyx-php-runtime.tar.gz" \
 	target_executable php-cli php.ini pcov.so opcache.so atropos_shm.so lib php-code-coverage \
-	atropos-coverage-auto-prepend.php atropos-coverage-auto-append.php atropos-nyx-bootstrap.php
+	atropos-coverage-auto-prepend.php atropos-coverage-auto-append.php atropos-nyx-bootstrap.php \
+	atropos-flush-permalinks.php
 printf 'php-code-coverage-9.2.31+phpcov-8.2.1+atropos-shm-v2\n' >"$ARTIFACT_DIR/php-code-coverage-runtime"
 printf 'Nyx PHP/PCOV runtime: %s\n' "$ARTIFACT_DIR"
 printf 'Host PHP prefix: %s\n' "$PHP_PREFIX"

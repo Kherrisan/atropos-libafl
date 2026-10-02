@@ -8,7 +8,7 @@ mod stage;
 
 use std::{borrow::Cow, env, fs};
 
-use input::{HttpInput, NYX_INPUT_BUFFER_SIZE};
+use input::NYX_INPUT_BUFFER_SIZE;
 use libafl::{
     corpus::{Corpus, OnDiskCorpus},
     events::SimpleEventManager,
@@ -39,15 +39,17 @@ fn load_operations() -> Vec<openapi::Operation> {
     }
 }
 
-fn seeds(operations: &[openapi::Operation]) -> Vec<HttpInput> {
-    if operations.is_empty() {
-        vec![HttpInput::batch_seed()]
-    } else {
-        operations
-            .iter()
-            .map(openapi::Operation::to_input)
-            .collect()
-    }
+fn corpus_has_inputs(dir: &std::path::Path) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    entries.filter_map(Result::ok).any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| !name.starts_with('.'))
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+    })
 }
 
 fn main() {
@@ -92,6 +94,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     fs::create_dir_all(&workdir)?;
 
+    let output_dir = paths::output_dir();
+    let corpus_dir = output_dir.join("nyx-corpus");
+    let corpus_ready = corpus_has_inputs(&corpus_dir);
+    let (startup_seeds, seed_tokens) = if let Some(dir) = paths::seed_dir() {
+        let seeds = input::load_seed_directory(&dir)?;
+        let tokens = input::dictionary_tokens(&seeds);
+        eprintln!(
+            "seeds: {} file(s) from {} contributed {} dictionary token(s)",
+            seeds.len(),
+            dir.display(),
+            tokens.len()
+        );
+        if corpus_ready {
+            (Vec::new(), tokens)
+        } else {
+            (seeds, tokens)
+        }
+    } else if corpus_ready {
+        (Vec::new(), Vec::new())
+    } else {
+        return Err(
+            "ATROPOS_SEED_DIR is unset. Set it to a directory containing one JSON seed per file."
+                .to_string()
+                .into(),
+        );
+    };
+
     let cpu_id = paths::nyx_cpu_id();
     let timeout_secs = env::var("ATROPOS_NYX_TIMEOUT_SECS")
         .ok()
@@ -114,8 +143,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         StdMapObserver::from_mut_ptr("nyx-pcov", helper.bitmap_buffer, helper.bitmap_size)
     };
 
-    let output_dir = paths::output_dir();
-    let corpus_dir = output_dir.join("nyx-corpus");
     let solution_dir = output_dir.join("nyx-solutions");
     fs::create_dir_all(&corpus_dir)?;
     fs::create_dir_all(&solution_dir)?;
@@ -139,14 +166,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut executor = NyxExecutor::builder().build(helper, tuple_list!(observer));
 
     let operations = load_operations();
-    if state.corpus().count() == 0 {
-        for seed in seeds(&operations) {
-            fuzzer.add_input(&mut state, &mut executor, &mut manager, seed)?;
-        }
+    for seed in startup_seeds {
+        fuzzer.add_input(&mut state, &mut executor, &mut manager, seed)?;
     }
 
     let stage = DeterministicStage::new(
-        DeterministicMutator::new(operations)?,
+        DeterministicMutator::new(operations, &seed_tokens)?,
         LlmAgent::new(LlmConfig::from_env()),
     );
     let mut stages = tuple_list!(stage);

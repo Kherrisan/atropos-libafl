@@ -68,7 +68,7 @@ impl LlmConfig {
             probability: env::var("ATROPOS_LLM_PROB")
                 .ok()
                 .and_then(|text| text.parse().ok())
-                .unwrap_or(0.8),
+                .unwrap_or(0.0),
             timeout: Duration::from_secs(
                 env::var("ATROPOS_LLM_TIMEOUT")
                     .ok()

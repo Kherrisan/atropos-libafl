@@ -377,6 +377,311 @@ fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace('\0', "")
 }
 
+const SEED_FIELDS: &[&str] = &[
+    "method",
+    "path",
+    "query",
+    "headers",
+    "cookies",
+    "body",
+    "body_override",
+    "operation_key",
+    "pin_route",
+    "exec_limit",
+    "redqueen",
+    "coverage_dump",
+];
+
+/// Load one seed from each top-level `*.json` file that matches the seed format.
+///
+/// A seed object requires `method`, `path`, and `body`. `query`, `headers`, and
+/// `cookies` are string maps or arrays of `[key, value]` pairs. `pin_route`
+/// defaults to true. Files that do not match are skipped.
+pub fn load_seed_directory(dir: &std::path::Path) -> Result<Vec<HttpInput>, String> {
+    if !dir.is_dir() {
+        return Err(format!("seed directory does not exist: {}", dir.display()));
+    }
+
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir)
+        .map_err(|err| format!("cannot read seed directory {}: {err}", dir.display()))?
+    {
+        let entry =
+            entry.map_err(|err| format!("cannot read seed directory {}: {err}", dir.display()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with('.') || !name.ends_with(".json") {
+            continue;
+        }
+        if !entry.metadata().is_ok_and(|meta| meta.is_file()) {
+            continue;
+        }
+        names.push(name.to_string());
+    }
+    names.sort();
+    if names.is_empty() {
+        return Err(format!(
+            "seed directory {} contains no .json files",
+            dir.display()
+        ));
+    }
+
+    let mut seeds = Vec::new();
+    let mut skipped = Vec::new();
+    for name in names {
+        let path = dir.join(&name);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| format!("cannot read seed {}: {err}", path.display()))?;
+        match parse_seed_json(&text) {
+            Ok(seed) => seeds.push(seed),
+            Err(reason) => skipped.push(format!("{name}: {reason}")),
+        }
+    }
+    if seeds.is_empty() {
+        return Err(format!(
+            "seed directory {} has no JSON file in the seed format: {}",
+            dir.display(),
+            skipped.join("; ")
+        ));
+    }
+    for reason in &skipped {
+        eprintln!("seed: skipped {reason}");
+    }
+    Ok(seeds)
+}
+
+/// Object keys and scalar values from every seed, in seed order, without duplicates.
+pub fn dictionary_tokens(seeds: &[HttpInput]) -> Vec<String> {
+    let mut tokens = Vec::new();
+    for seed in seeds {
+        push_token(&mut tokens, &seed.method);
+        push_token(&mut tokens, &seed.path);
+        for (key, value) in seed.query.iter().chain(&seed.headers).chain(&seed.cookies) {
+            push_token(&mut tokens, key);
+            push_token(&mut tokens, &String::from_utf8_lossy(value));
+        }
+        collect_json_tokens(&seed.body, &mut tokens);
+        if let Some(key) = &seed.operation_key {
+            push_token(&mut tokens, key);
+        }
+        if let Some(raw) = &seed.body_override {
+            let text = String::from_utf8_lossy(raw);
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(value) => collect_json_value_tokens(&value, &mut tokens),
+                Err(_) => push_token(&mut tokens, &text),
+            }
+        }
+    }
+    tokens
+}
+
+fn push_token(tokens: &mut Vec<String>, token: &str) {
+    if token.is_empty() || tokens.iter().any(|existing| existing == token) {
+        return;
+    }
+    tokens.push(token.to_string());
+}
+
+fn collect_json_tokens(value: &JsonValue, tokens: &mut Vec<String>) {
+    match value {
+        JsonValue::Null => {}
+        JsonValue::Bool(bit) => push_token(tokens, if *bit { "true" } else { "false" }),
+        JsonValue::Number(text) => push_token(tokens, text),
+        JsonValue::String(bytes) => push_token(tokens, &String::from_utf8_lossy(bytes)),
+        JsonValue::Array(items) => {
+            for item in items {
+                collect_json_tokens(item, tokens);
+            }
+        }
+        JsonValue::Object(fields) => {
+            for (key, child) in fields {
+                push_token(tokens, key);
+                collect_json_tokens(child, tokens);
+            }
+        }
+    }
+}
+
+fn collect_json_value_tokens(value: &serde_json::Value, tokens: &mut Vec<String>) {
+    match value {
+        serde_json::Value::Null => {}
+        serde_json::Value::Bool(bit) => push_token(tokens, if *bit { "true" } else { "false" }),
+        serde_json::Value::Number(number) => push_token(tokens, &number.to_string()),
+        serde_json::Value::String(text) => push_token(tokens, text),
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_json_value_tokens(item, tokens);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for (key, child) in fields {
+                push_token(tokens, key);
+                collect_json_value_tokens(child, tokens);
+            }
+        }
+    }
+}
+
+fn parse_seed_json(text: &str) -> Result<HttpInput, String> {
+    let value: serde_json::Value =
+        serde_json::from_str(text).map_err(|err| format!("invalid JSON: {err}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "seed must be a JSON object".to_string())?;
+    for key in object.keys() {
+        if !SEED_FIELDS.contains(&key.as_str()) {
+            return Err(format!("unknown field {key}"));
+        }
+    }
+
+    let method = required_string(object, "method")?;
+    if method.is_empty() || !method.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        return Err("method must be an HTTP method".to_string());
+    }
+    let method = method.to_ascii_uppercase();
+
+    let path = required_string(object, "path")?;
+    if !path.starts_with('/') || path.contains(['?', '#', ' ', '\0']) {
+        return Err(
+            "path must start with / and must not contain a query, hash, or space".to_string(),
+        );
+    }
+
+    let body = object
+        .get("body")
+        .ok_or_else(|| "missing body".to_string())?;
+    let query = pairs_field(object, "query")?;
+    let headers = pairs_field(object, "headers")?;
+    let cookies = pairs_field(object, "cookies")?;
+    let body_override = optional_string(object, "body_override")?.map(|text| text.into_bytes());
+    let operation_key = match optional_string(object, "operation_key")? {
+        Some(key) if !key.is_empty() => Some(key),
+        _ => Some(format!("{method} {path}")),
+    };
+
+    let input = HttpInput {
+        method,
+        path,
+        query,
+        headers,
+        cookies,
+        body: JsonValue::from_json(body),
+        body_override,
+        operation_key,
+        pin_route: optional_bool(object, "pin_route")?.unwrap_or(true),
+        exec_limit: optional_u32(object, "exec_limit")?.unwrap_or(0),
+        redqueen: optional_bool(object, "redqueen")?.unwrap_or(false),
+        coverage_dump: optional_bool(object, "coverage_dump")?.unwrap_or(false),
+    };
+    if input.nyx_payload().len() > NYX_INPUT_BUFFER_SIZE {
+        return Err(format!("payload exceeds {NYX_INPUT_BUFFER_SIZE} bytes"));
+    }
+    Ok(input)
+}
+
+fn required_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<String, String> {
+    match object.get(field) {
+        Some(serde_json::Value::String(text)) => Ok(text.trim().to_string()),
+        Some(_) => Err(format!("{field} must be a string")),
+        None => Err(format!("missing {field}")),
+    }
+}
+
+fn optional_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    match object.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(text)) => Ok(Some(text.trim().to_string())),
+        Some(_) => Err(format!("{field} must be a string")),
+    }
+}
+
+fn optional_bool(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<bool>, String> {
+    match object.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Bool(bit)) => Ok(Some(*bit)),
+        Some(_) => Err(format!("{field} must be a boolean")),
+    }
+}
+
+fn optional_u32(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Option<u32>, String> {
+    match object.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(number)) => number
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .map(Some)
+            .ok_or_else(|| format!("{field} must be an integer from 0 to 4294967295")),
+        Some(_) => Err(format!("{field} must be an integer from 0 to 4294967295")),
+    }
+}
+
+fn pairs_field(
+    object: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    match object.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+        Some(value) => parse_pairs(value, field),
+    }
+}
+
+fn parse_pairs(value: &serde_json::Value, field: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut pairs = Vec::with_capacity(map.len());
+            for (key, item) in map {
+                if key.is_empty() {
+                    return Err(format!("{field} contains an empty key"));
+                }
+                let text = item
+                    .as_str()
+                    .ok_or_else(|| format!("{field}.{key} must be a string"))?;
+                pairs.push((key.clone(), text.as_bytes().to_vec()));
+            }
+            Ok(pairs)
+        }
+        serde_json::Value::Array(items) => {
+            let mut pairs = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().enumerate() {
+                let Some(pair) = item.as_array() else {
+                    return Err(format!("{field}[{index}] must be a [key, value] pair"));
+                };
+                if pair.len() != 2 {
+                    return Err(format!("{field}[{index}] must be a [key, value] pair"));
+                }
+                let key = pair[0]
+                    .as_str()
+                    .ok_or_else(|| format!("{field}[{index}] key must be a string"))?;
+                let text = pair[1]
+                    .as_str()
+                    .ok_or_else(|| format!("{field}[{index}] value must be a string"))?;
+                if key.is_empty() {
+                    return Err(format!("{field}[{index}] contains an empty key"));
+                }
+                pairs.push((key.to_string(), text.as_bytes().to_vec()));
+            }
+            Ok(pairs)
+        }
+        _ => Err(format!(
+            "{field} must be an object or an array of [key, value] pairs"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +692,129 @@ mod tests {
         let body = String::from_utf8(seed.body_bytes()).unwrap();
         assert!(body.contains("\"requests\""));
         assert!(body.contains("seed"));
+    }
+
+    #[test]
+    fn seed_directory_loads_one_json_file_per_seed_and_skips_the_rest() {
+        let dir = std::env::temp_dir().join(format!("atropos-seed-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("b-posts.json"),
+            r#"{"method":"post","path":"/wp-json/batch/v1","query":{"preview":"1"},"headers":[["X-Test","yes"]],"body":{"title":"seed"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("a-empty.json"),
+            r#"{"method":"GET","path":"/wp-json/wp/v2/posts","body":null,"pin_route":false,"exec_limit":3}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a seed").unwrap();
+        std::fs::write(dir.join("bad.json"), r#"{"method":"POST"}"#).unwrap();
+        std::fs::write(
+            dir.join(".hidden.json"),
+            r#"{"method":"GET","path":"/","body":{}}"#,
+        )
+        .unwrap();
+
+        let seeds = load_seed_directory(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        assert_eq!(seeds.len(), 2);
+        assert_eq!(seeds[0].method, "GET");
+        assert_eq!(seeds[0].path, "/wp-json/wp/v2/posts");
+        assert_eq!(seeds[0].body, JsonValue::Null);
+        assert!(!seeds[0].pin_route);
+        assert_eq!(seeds[0].exec_limit, 3);
+        assert_eq!(
+            seeds[0].operation_key.as_deref(),
+            Some("GET /wp-json/wp/v2/posts")
+        );
+        assert_eq!(seeds[1].method, "POST");
+        assert_eq!(seeds[1].query, vec![("preview".to_string(), b"1".to_vec())]);
+        assert_eq!(
+            seeds[1].headers,
+            vec![("X-Test".to_string(), b"yes".to_vec())]
+        );
+        assert!(seeds[1].pin_route);
+        let body = String::from_utf8(seeds[1].body_bytes()).unwrap();
+        assert!(body.contains("\"title\":\"seed\""));
+
+        let tokens = dictionary_tokens(&seeds);
+        for expected in [
+            "GET",
+            "POST",
+            "/wp-json/wp/v2/posts",
+            "/wp-json/batch/v1",
+            "preview",
+            "1",
+            "X-Test",
+            "yes",
+            "title",
+            "seed",
+        ] {
+            assert!(
+                tokens.iter().any(|token| token == expected),
+                "missing {expected} in {tokens:?}"
+            );
+        }
+        assert_eq!(tokens.iter().filter(|token| *token == "POST").count(), 1);
+    }
+
+    #[test]
+    fn dictionary_tokens_include_nested_keys_and_scalar_values() {
+        let seed = parse_seed_json(
+            r#"{"method":"POST","path":"/wp/v2/posts","body":{"title":"seed","count":2,"ok":true,"tags":["a",""]}}"#,
+        )
+        .unwrap();
+        let tokens = dictionary_tokens(&[seed]);
+        for expected in [
+            "POST",
+            "/wp/v2/posts",
+            "title",
+            "seed",
+            "count",
+            "2",
+            "ok",
+            "true",
+            "tags",
+            "a",
+            "POST /wp/v2/posts",
+        ] {
+            assert!(
+                tokens.iter().any(|token| token == expected),
+                "missing {expected} in {tokens:?}"
+            );
+        }
+        assert!(tokens.iter().all(|token| !token.is_empty()));
+        assert_eq!(tokens.iter().filter(|token| *token == "POST").count(), 1);
+    }
+
+    #[test]
+    fn seed_directory_rejects_a_directory_with_no_valid_json() {
+        let dir = std::env::temp_dir().join(format!("atropos-seed-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("bad.json"),
+            r#"{"path":"/wp/v2/posts?x=1","method":"POST","body":{}}"#,
+        )
+        .unwrap();
+
+        let error = load_seed_directory(&dir).unwrap_err();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(error.contains("no JSON file in the seed format"), "{error}");
+        assert!(error.contains("path must start with /"), "{error}");
+    }
+
+    #[test]
+    fn nyx_payload_has_complete_json_and_a_terminal_nul() {
+        let payload = HttpInput::batch_seed().nyx_payload();
+        assert_eq!(payload.last(), Some(&0));
+
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&payload[..payload.len() - 1]).unwrap();
+        assert!(parsed["requests"].is_array());
     }
 
     #[test]

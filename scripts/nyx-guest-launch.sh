@@ -7,7 +7,8 @@ fi
 
 RUNTIME_DIR=/usr/local/lib/atropos-nyx-php
 if [[ ! -x "$RUNTIME_DIR/target_executable" || ! -x "$RUNTIME_DIR/php-cli" || \
-	! -f "$RUNTIME_DIR/atropos_shm.so" || ! -f "$RUNTIME_DIR/atropos-nyx-bootstrap.php" ]]; then
+	! -f "$RUNTIME_DIR/atropos_shm.so" || ! -f "$RUNTIME_DIR/atropos-nyx-bootstrap.php" || \
+	! -f "$RUNTIME_DIR/atropos-flush-permalinks.php" ]]; then
 	RUNTIME_ARCHIVE=/usr/local/lib/atropos-nyx-runtime.tar.gz
 	if [[ ! -f "$RUNTIME_ARCHIVE" ]]; then
 		echo "Nyx PHP runtime is missing from $RUNTIME_DIR" >&2
@@ -24,10 +25,10 @@ cp -r "$RUNTIME_DIR"/. /tmp/
 cp -r "$RUNTIME_DIR"/lib/. /tmp/
 chmod 0755 /tmp/target_executable /tmp/php-cli /tmp/pcov.so
 chmod 0644 /tmp/php.ini
-chmod 0644 /tmp/atropos_shm.so /tmp/atropos-nyx-bootstrap.php
+chmod 0644 /tmp/atropos_shm.so /tmp/atropos-nyx-bootstrap.php /tmp/atropos-flush-permalinks.php
 if [[ -f /tmp/opcache.so ]]; then
 	chmod 0644 /tmp/opcache.so
 fi
 
 exec env IN_NYX=1 PHP_TARGET=/tmp/target_executable LD_LIBRARY_PATH=/tmp/ \
-	/usr/local/bin/atropos_agent
+	/tmp/ld-linux-x86-64.so.2 --library-path /tmp/ /usr/local/bin/atropos_agent

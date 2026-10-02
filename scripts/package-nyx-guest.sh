@@ -10,16 +10,17 @@ if [[ "${ATROPOS_NYX_BUILD_SHELL:-0}" != 1 ]]; then
 fi
 
 LEGACY_ROOT="${ATROPOS_LEGACY_ROOT:-$(cd -- "$REPO_ROOT/../atropos-legacy" && pwd)}"
-ARTIFACT_DIR="${ATROPOS_NYX_GUEST_ARTIFACTS:-${XDG_DATA_HOME:-$HOME/.local/share}/atropos-libafl/nyx/guest}"
+DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}"
+ARTIFACT_DIR="${ATROPOS_NYX_GUEST_ARTIFACTS:-$DATA_DIR/guest}"
 WP_ROOT="${ATROPOS_WORDPRESS_ROOT:-$REPO_ROOT/../wordpress}"
 WP_ROOT="$(realpath -- "$WP_ROOT")"
 SECRET_FILE="${ATROPOS_WORDPRESS_SECRET_FILE:-$HOME/.config/atropos-libafl/wordpress-db.env}"
-DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/atropos-libafl/nyx}"
 BUNDLE_DIR="$DATA_DIR/bundle"
 
 for path in "$ARTIFACT_DIR/nyx-php-runtime.tar.gz" "$ARTIFACT_DIR/php-code-coverage-runtime" \
 	"$ARTIFACT_DIR/atropos-agent-phpcov-runtime" "$ARTIFACT_DIR/atropos_agent" \
 	"$ARTIFACT_DIR/php-cli" "$ARTIFACT_DIR/atropos_shm.so" "$ARTIFACT_DIR/atropos-nyx-bootstrap.php" \
+	"$ARTIFACT_DIR/atropos-flush-permalinks.php" \
 	"$WP_ROOT/index.php" "$WP_ROOT/wp-config.php" "$SECRET_FILE" \
 	"$LEGACY_ROOT/fuzzer/nyx.h" "$SCRIPT_DIR/nyx-guest-launch.sh"; do
 	if [[ ! -e "$path" ]]; then
@@ -39,8 +40,8 @@ if ! command -v mariadb-dump >/dev/null 2>&1; then
 	printf 'mariadb-dump is unavailable; run this script through scripts/with-nyx-build-deps.sh\n' >&2
 	exit 1
 fi
-if ! systemctl --user is-active --quiet atropos-libafl-mariadb.service; then
-	printf 'The local Atropos MariaDB service is not active; run scripts/setup-wordpress.sh first\n' >&2
+if ! mariadb-admin --no-defaults --protocol=TCP --host=127.0.0.1 --port=33060 ping --silent >/dev/null 2>&1; then
+	printf 'The local Atropos MariaDB server is not active; run scripts/setup-wordpress.sh first\n' >&2
 	exit 1
 fi
 
@@ -134,26 +135,6 @@ data = data.replace("127.0.0.1:33060", "127.0.0.1")
 path.write_text(data)
 PY
 fi
-python3 - "$BUNDLE_DIR/wordpress/wp-settings.php" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-source = path.read_text()
-marker = "/* Atropos Nyx per-request checkpoint v1. */"
-hook = "// Load must-use plugins."
-if marker in source:
-    raise SystemExit(f"the guest WordPress tree is already patched: {path}")
-if source.count(hook) != 1:
-    raise SystemExit(f"could not find a unique MU-plugin checkpoint in {path}")
-source = source.replace(
-    hook,
-    marker + "\nif ( function_exists( 'atropos_nyx_bootstrap_request' ) ) {\n"
-    "\tatropos_nyx_bootstrap_request();\n}\n\n" + hook,
-)
-path.write_text(source)
-PY
-
 cat >"$BUNDLE_DIR/install-guest.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -267,7 +248,8 @@ chmod 0755 /usr/local/bin/atropos_agent \
 	/usr/local/lib/atropos-nyx-php/pcov.so
 chmod 0644 /usr/local/lib/atropos-nyx-php/php.ini
 chmod 0644 /usr/local/lib/atropos-nyx-php/atropos_shm.so \
-	/usr/local/lib/atropos-nyx-php/atropos-nyx-bootstrap.php
+	/usr/local/lib/atropos-nyx-php/atropos-nyx-bootstrap.php \
+	/usr/local/lib/atropos-nyx-php/atropos-flush-permalinks.php
 if [[ -f /usr/local/lib/atropos-nyx-php/opcache.so ]]; then
 	chmod 0644 /usr/local/lib/atropos-nyx-php/opcache.so
 fi
@@ -282,8 +264,7 @@ Requires=atropos-nyx-preimage.service atropos-nyx-db-import.service
 Type=simple
 WorkingDirectory=/
 ExecStart=/usr/local/bin/atropos-nyx-launch
-Restart=on-failure
-RestartSec=1
+Restart=no
 
 [Install]
 WantedBy=multi-user.target
@@ -303,6 +284,9 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 UNIT
+rm -f /etc/systemd/system/atropos-nyx-agent.service.d/diagnostic.conf
+rmdir --ignore-fail-on-non-empty /etc/systemd/system/atropos-nyx-agent.service.d 2>/dev/null || true
+systemctl daemon-reload
 systemctl enable atropos-nyx-agent.service
 systemctl enable atropos-nyx-preimage.service
 systemctl enable atropos-nyx-db-prepare.service

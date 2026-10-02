@@ -9,7 +9,7 @@ if [[ "${ATROPOS_NYX_BUILD_SHELL:-0}" != 1 ]]; then
 	exec "$SCRIPT_DIR/with-nyx-build-deps.sh" "$0" "$@"
 fi
 
-DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/atropos-libafl/nyx}"
+DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}"
 VM_DIR="${ATROPOS_NYX_VM_DIR:-$DATA_DIR/vm}"
 BASE_IMAGE="$VM_DIR/noble-server-cloudimg-amd64.img"
 VM_IMAGE="${ATROPOS_NYX_VM_IMAGE:-$VM_DIR/atropos-nyx.qcow2}"
@@ -197,7 +197,7 @@ else
 	PREIMAGE_LOG="$VM_DIR/preimage-serial.log"
 	printf 'Booting the Nyx guest once to create its pre-snapshot.\n'
 	set +e
-		timeout --signal=TERM 5m env NYX_DISABLE_DIRTY_RING=y "$QEMU_NYX" \
+		timeout --signal=TERM 20m env NYX_DISABLE_DIRTY_RING=y "$QEMU_NYX" \
 		-enable-kvm -machine kAFL64-v1 -cpu kAFL64-Hypervisor-v2 \
 		-smp 1 -m "$MEMORY_MB" -drive "file=$VM_IMAGE,format=qcow2,index=0,media=disk" \
 		-k de -net none -display none -serial "file:$PREIMAGE_LOG" -monitor none \

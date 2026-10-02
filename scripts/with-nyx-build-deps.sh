@@ -18,10 +18,13 @@ if ! command -v nix-shell >/dev/null 2>&1; then
 	exit 1
 fi
 
-ATROPOS_NIXPKGS_PATH="$(nix --extra-experimental-features 'nix-command flakes' eval --impure --raw \
-	--expr 'builtins.fetchTarball "https://channels.nixos.org/nixos-22.11/nixexprs.tar.xz"')"
+if [[ -z "${ATROPOS_NIXPKGS_PATH:-}" ]]; then
+	ATROPOS_NIXPKGS_PATH="$(nix --extra-experimental-features 'nix-command flakes' eval --impure --raw \
+		--expr 'builtins.fetchTarball "https://channels.nixos.org/nixos-22.11/nixexprs.tar.xz"')"
+fi
+export ATROPOS_NIXPKGS_PATH
 export NIX_PATH="nixpkgs=$ATROPOS_NIXPKGS_PATH${NIX_PATH:+:$NIX_PATH}"
 export LC_ALL=C
 printf -v command_line '%q ' "$@"
 exec nix-shell --extra-experimental-features 'nix-command flakes' \
-	"$REPO_ROOT/nyx-shell.nix" --run "$command_line"
+	-I "nixpkgs=$ATROPOS_NIXPKGS_PATH" "$REPO_ROOT/nyx-shell.nix" --run "$command_line"

@@ -1,17 +1,10 @@
 use std::{env, path::PathBuf};
 
-fn user_data_dir() -> PathBuf {
-    env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("atropos-libafl")
-}
-
 fn nyx_data_dir() -> PathBuf {
     env::var_os("ATROPOS_NYX_DATA_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| user_data_dir().join("nyx"))
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".nyx")))
+        .unwrap_or_else(|| env::temp_dir().join("atropos-libafl-nyx"))
 }
 
 pub fn project_dir() -> PathBuf {
@@ -38,6 +31,12 @@ pub fn openapi_path() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+pub fn seed_dir() -> Option<PathBuf> {
+    env::var_os("ATROPOS_SEED_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 pub fn nyx_share_dir() -> PathBuf {
     env::var_os("ATROPOS_NYX_SHARE")
         .map(PathBuf::from)
@@ -53,7 +52,7 @@ pub fn nyx_vm_dir() -> PathBuf {
 pub fn nyx_guest_artifact_dir() -> PathBuf {
     env::var_os("ATROPOS_NYX_GUEST_ARTIFACTS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| user_data_dir().join("nyx/guest"))
+        .unwrap_or_else(|| nyx_data_dir().join("guest"))
 }
 
 pub fn nyx_php_cli() -> PathBuf {

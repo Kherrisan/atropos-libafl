@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/atropos-libafl/nyx}"
+DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}"
 SHARE_DIR="${ATROPOS_NYX_SHARE:-$DATA_DIR/share}"
 WORKDIR="${ATROPOS_NYX_WORKDIR:-$DATA_DIR/workdir}"
 VM_DIR="${ATROPOS_NYX_VM_DIR:-$DATA_DIR/vm}"

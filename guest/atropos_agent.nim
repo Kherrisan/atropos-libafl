@@ -8,6 +8,7 @@ proc nyx_init(): void {.importc.}
 proc nyx_create_snapshot(): void {.importc.}
 proc nyx_exit(): void {.importc.}
 proc nyx_get_payload(): cstring {.importc.}
+proc nyx_get_payload_len(): uint32 {.importc.}
 proc nyx_get_shm_id(): cint {.importc.}
 proc nyx_get_bitmap_size(): uint32 {.importc.}
 proc nyx_report_crash(message: cstring): void {.importc.}
@@ -28,7 +29,7 @@ const
   ChannelBootReady = 1
   ChannelOutputTruncated = 1'u32
   MaxRequestBytes = 1024 * 1024
-  MaxWaitForWordPressMs = 300_000'u32
+  MaxWaitForWordPressMs = 900_000'u32
   RequestWaitMs = 120_000'u32
   SecretReadTrigger = "secret4815162342"
 
@@ -62,10 +63,13 @@ proc guestLog(message: string) =
   if message.len > 0:
     nyx_hprintf(message.cstring)
 
-proc startMariaDb() =
-  discard execCmd("chown -R mysql:mysql /var/lib/mysql /var/run/mysqld; service mysql restart")
+proc startMariaDb(): bool =
   discard execCmd("chmod -R 777 /var/lib/php/sessions/")
-  sleep(3000)
+  for attempt in 0 ..< 100:
+    if execCmd("mariadb-admin --no-defaults --protocol=socket ping --silent >/dev/null 2>&1") == 0:
+      return true
+    sleep(100)
+  false
 
 proc startPhpWorker(shmId: cint, bitmapSize: uint32) =
   discard execCmd("rm -f /tmp/redqueen_mode_enabled /tmp/coverage_dump_enabled /tmp/execution_limit /tmp/bug_triggered /tmp/atropos-php-coverage-enabled")
@@ -87,13 +91,13 @@ proc waitForWordPressCheckpoint(): bool =
 
 proc freshPayload(): string =
   let raw = nyx_get_payload()
-  if raw == nil:
+  let payloadLength = int(nyx_get_payload_len())
+  if raw == nil or payloadLength <= 0 or payloadLength > MaxRequestBytes:
     return ""
-  result = newString(MaxRequestBytes)
-  var length = 0
-  while length < MaxRequestBytes and raw[length] != '\0':
-    inc length
-  result.setLen(length)
+  result = newString(payloadLength)
+  copyMem(addr result[0], raw, payloadLength)
+  if result[^1] == '\0':
+    result.setLen(result.len - 1)
 
 proc parsePayloadWithSnapshotHandshake(): JsonNode =
   nyx_create_snapshot()
@@ -174,13 +178,14 @@ proc main() =
     quit(1)
 
   guestLog(fmt"Created Atropos request shared-memory segment {requestShmId}\n")
-  guestLog("Restarting MariaDB before WordPress bootstrap\n")
-  startMariaDb()
-  guestLog("MariaDB restart returned\n")
+  guestLog("Waiting for MariaDB before WordPress bootstrap\n")
+  if not startMariaDb():
+    guestLog("MariaDB did not become ready; aborting the guest agent\n")
+    quit(1)
   startPhpWorker(requestShmId, nyx_get_bitmap_size())
   guestLog("Started PHP CLI request worker; waiting at the WordPress pre-plugin checkpoint\n")
   if not waitForWordPressCheckpoint():
-    guestLog("WordPress did not reach the wp-settings checkpoint within five minutes\n")
+    guestLog("WordPress did not reach the request checkpoint within fifteen minutes\n")
     if fileExists("/tmp/php-cli.log"):
       guestLog(readFile("/tmp/php-cli.log"))
     quit(1)
@@ -222,6 +227,8 @@ proc main() =
     quit(0)
 
   let output = copyRequestOutput()
+  let preview = if output.len > 180: output[0 .. 179] else: output
+  guestLog(fmt"response_bytes={output.len} body={preview}" & "\n")
   var crashLog = ""
   if SecretReadTrigger in output:
     crashLog.add("bug oracle triggered: validated arbitrary read in /var/www/html/index.php\n")

@@ -48,11 +48,14 @@ if [[ ! "$MARIADB_DATABASE" =~ ^[A-Za-z0-9_]+$ || ! "$MARIADB_USER" =~ ^[A-Za-z0
 	exit 1
 fi
 
-ATROPOS_NIXPKGS_PATH="$(nix --extra-experimental-features 'nix-command flakes' eval --impure --raw \
-	--expr 'builtins.fetchTarball "https://channels.nixos.org/nixos-22.11/nixexprs.tar.xz"')"
+if [[ -z "${ATROPOS_NIXPKGS_PATH:-}" ]]; then
+	ATROPOS_NIXPKGS_PATH="$(nix --extra-experimental-features 'nix-command flakes' eval --impure --raw \
+		--expr 'builtins.fetchTarball "https://channels.nixos.org/nixos-22.11/nixexprs.tar.xz"')"
+fi
+export ATROPOS_NIXPKGS_PATH
 export NIX_PATH="nixpkgs=$ATROPOS_NIXPKGS_PATH${NIX_PATH:+:$NIX_PATH}"
 MARIADB_PREFIX="$(nix --extra-experimental-features 'nix-command flakes' eval --impure --raw \
-	--expr 'let pkgs = import <nixpkgs> {}; in pkgs.mariadb.outPath')"
+	-I "nixpkgs=$ATROPOS_NIXPKGS_PATH" --expr 'let pkgs = import <nixpkgs> {}; in pkgs.mariadb.outPath')"
 MARIADB_BIN="$MARIADB_PREFIX/bin"
 
 mkdir -p "$DB_DIR"
@@ -84,14 +87,20 @@ UMask=0077
 WantedBy=default.target
 EOF
 chmod 600 "$DB_SERVICE_FILE"
-if ! systemctl --user show-environment >/dev/null 2>&1; then
-	printf 'A running systemd user manager is required to keep MariaDB available after setup.\n' >&2
-	exit 1
-fi
-systemctl --user daemon-reload
-if ! systemctl --user is-active --quiet "$DB_SERVICE_NAME"; then
-	rm -f -- "$DB_SOCKET" "$DB_PID"
-	systemctl --user enable --now "$DB_SERVICE_NAME"
+if systemctl --user show-environment >/dev/null 2>&1; then
+	systemctl --user daemon-reload
+	if ! systemctl --user is-active --quiet "$DB_SERVICE_NAME"; then
+		rm -f -- "$DB_SOCKET" "$DB_PID"
+		systemctl --user enable --now "$DB_SERVICE_NAME"
+	fi
+else
+	if ! "$MARIADB_BIN/mariadb-admin" --no-defaults --socket="$DB_SOCKET" -uroot ping --silent >/dev/null 2>&1; then
+		rm -f -- "$DB_SOCKET" "$DB_PID"
+		nohup "$MARIADB_BIN/mariadbd" --no-defaults --basedir="$MARIADB_BASEDIR" \
+			--datadir="$DB_DIR" --user="$(id -un)" --socket="$DB_SOCKET" \
+			--pid-file="$DB_PID" --bind-address=127.0.0.1 --port=33060 \
+			--log-error="$DB_LOG" </dev/null >/dev/null 2>&1 &
+	fi
 fi
 
 ready=0
