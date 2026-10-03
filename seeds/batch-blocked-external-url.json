@@ -1,0 +1,24 @@
+{
+  "method": "POST",
+  "path": "/wp-json/batch/v1",
+  "body": {
+    "validation": "normal",
+    "requests": [
+      {
+        "method": "POST",
+        "path": "http://evil.example/wp/v2/posts?context=edit",
+        "body": {
+          "title": "seed"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "//evil.example/wp/v2/pages",
+        "body": {
+          "title": "seed"
+        }
+      }
+    ]
+  },
+  "pin_route": true
+}

@@ -1,0 +1,20 @@
+{
+  "method": "POST",
+  "path": "/wp-json/batch/v1",
+  "body": {
+    "validation": "normal",
+    "requests": [
+      {
+        "method": "POST",
+        "path": "/wp/v2/menu-items",
+        "body": {
+          "title": "seed",
+          "type": "custom",
+          "status": "publish",
+          "url": "javascript:seed"
+        }
+      }
+    ]
+  },
+  "pin_route": true
+}

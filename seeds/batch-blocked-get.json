@@ -1,0 +1,17 @@
+{
+  "method": "POST",
+  "path": "/wp-json/batch/v1",
+  "body": {
+    "validation": "normal",
+    "requests": [
+      {
+        "method": "GET",
+        "path": "/wp/v2/posts/1",
+        "body": {
+          "context": "edit"
+        }
+      }
+    ]
+  },
+  "pin_route": true
+}

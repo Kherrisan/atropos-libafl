@@ -16,7 +16,7 @@
 - `cargo fmt --check` checks Rust formatting; run `cargo fmt` to apply it.
 - `cargo test` runs the Rust unit tests embedded in modules under `src/`.
 - `scripts/build-nyx-fuzzer.sh` builds the Nyx-enabled LibAFL/QEMU toolchain. `scripts/build-nyx-php.sh` builds PHP/PCOV and the guest runtime; follow the container setup in `README.md`.
-- After preparing the guest and KVM, use `ATROPOS_NYX_ITERS=20 ATROPOS_OUTPUT_DIR="$PWD" scripts/run-fuzzer.sh` for a short integration smoke run.
+- After preparing the guest and KVM, use `ATROPOS_NYX_ITERS=20 scripts/run-fuzzer.sh` for a short integration smoke run. The corpus and objectives default to `./corpus` and `./objectives`.
 
 ## Coding Style
 

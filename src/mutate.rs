@@ -14,15 +14,12 @@ use crate::{
     openapi::{Operation, Schema},
 };
 
-const CANARIES: &[&[u8]] = &[
-    b"' crash ",
-    b"\" crash ",
-    b"crash",
-    b"crash.php",
-    b"secret4815162342",
-];
+const DELIMITERS: &[u8] = b"/._,:; \"'";
+pub(crate) const OPENAPI_COMPLIANCE_RATE: f64 = 0.5;
+const BUDGET_MIN: usize = 8;
+const BUDGET_MAX: usize = 64;
 
-const NUMBER_EDGES: &[&str] = &[
+pub(crate) const NUMBER_EDGES: &[&str] = &[
     "0",
     "1",
     "-1",
@@ -59,22 +56,29 @@ enum MutationOp {
     Crossover,
 }
 
-pub struct DeterministicMutator {
+pub struct InputMutator {
     name: Cow<'static, str>,
     operations: Vec<Operation>,
     dictionary: Vec<String>,
+    bug_triggers: Vec<String>,
     key_candidates: Vec<String>,
     violation_rate: f64,
 }
 
-impl DeterministicMutator {
-    pub fn new(operations: Vec<Operation>, seed_tokens: &[String]) -> Result<Self, String> {
-        let mut dictionary = load_dictionary_from_env()?;
+impl InputMutator {
+    pub fn new(
+        operations: Vec<Operation>,
+        seed_tokens: &[String],
+        dictionary_paths: &[std::path::PathBuf],
+        bug_trigger_paths: &[std::path::PathBuf],
+    ) -> Result<Self, String> {
+        let mut dictionary = load_dictionary_paths(dictionary_paths)?;
         for token in seed_tokens {
             if !token.is_empty() && !dictionary.iter().any(|existing| existing == token) {
                 dictionary.push(token.clone());
             }
         }
+        let bug_triggers = load_dictionary_paths(bug_trigger_paths)?;
         let key_candidates = collect_key_candidates(&operations, &dictionary);
         let violation_rate = env::var("ATROPOS_SCHEMA_VIOLATION_RATE")
             .ok()
@@ -84,19 +88,18 @@ impl DeterministicMutator {
             .unwrap_or(0.1);
 
         Ok(Self {
-            name: Cow::Borrowed("deterministic-mutator"),
+            name: Cow::Borrowed("mutation"),
             operations,
             dictionary,
+            bug_triggers,
             key_candidates,
             violation_rate,
         })
     }
 
-    /// Build one independent candidate for every applicable operation, in the
-    /// stable order returned by `applicable_operations`. Each candidate starts
-    /// from the original testcase; a successful mutation never feeds the next
-    /// operation.
-    pub fn deterministic_inputs<S>(
+    /// Build `budget` independent candidates. Each one clones the original and
+    /// mutates a single randomly chosen site.
+    pub fn mutation_inputs<S>(
         &mut self,
         state: &mut S,
         input: &HttpInput,
@@ -104,29 +107,24 @@ impl DeterministicMutator {
     where
         S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
     {
-        let operations = applicable_operations(state, input)?;
-        let mut candidates = Vec::with_capacity(operations.len() + 1);
-
-        for operation in operations {
-            let mut candidate = input.clone();
-            let changed = apply_operation(
-                state,
-                &mut candidate,
-                operation,
-                &self.operations,
-                &self.dictionary,
-                &self.key_candidates,
-            )?;
-            if changed
-                && candidate != *input
-                && candidate.target_bytes().len() <= NYX_INPUT_BUFFER_SIZE
-            {
-                candidates.push(candidate);
+        let has_donor = has_crossover_donor(state)?;
+        let sites = mutation_sites(input, has_donor);
+        let mut candidates = Vec::new();
+        if !sites.is_empty() {
+            let budget = mutation_budget(sites.len());
+            for _ in 0..budget {
+                let mut candidate = input.clone();
+                let site = sites[state.rand_mut().below_or_zero(sites.len())].clone();
+                let changed = self.mutate_site(state, &mut candidate, &site)?;
+                if changed
+                    && candidate != *input
+                    && candidate.target_bytes().len() <= NYX_INPUT_BUFFER_SIZE
+                {
+                    candidates.push(candidate);
+                }
             }
         }
 
-        // Keep schema-violating inputs as an optional final candidate. The
-        // ordinary structured operators above still get their turn each pass.
         if state.rand_mut().coinflip(self.violation_rate) {
             let mut candidate = input.clone();
             if inject_malformed_body(&mut candidate)
@@ -139,15 +137,36 @@ impl DeterministicMutator {
 
         Ok(candidates)
     }
+
+    fn mutate_site<S>(
+        &mut self,
+        state: &mut S,
+        input: &mut HttpInput,
+        site: &Site,
+    ) -> Result<bool, Error>
+    where
+        S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
+    {
+        let operation = crate::openapi::match_operation(input, &self.operations);
+        mutate_site(
+            state,
+            input,
+            site,
+            operation,
+            &self.dictionary,
+            &self.bug_triggers,
+            &self.key_candidates,
+        )
+    }
 }
 
-impl Named for DeterministicMutator {
+impl Named for InputMutator {
     fn name(&self) -> &Cow<'static, str> {
         &self.name
     }
 }
 
-impl<S> Mutator<HttpInput, S> for DeterministicMutator
+impl<S> Mutator<HttpInput, S> for InputMutator
 where
     S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
 {
@@ -162,13 +181,20 @@ where
                 &self.key_candidates,
             );
         }
-        mutate_one(
-            state,
-            input,
-            &self.operations,
-            &self.dictionary,
-            &self.key_candidates,
-        )
+        let has_donor = has_crossover_donor(state)?;
+        let sites = mutation_sites(input, has_donor);
+        if sites.is_empty() {
+            return Ok(MutationResult::Skipped);
+        }
+        let site = sites[state.rand_mut().below_or_zero(sites.len())].clone();
+        let mut candidate = input.clone();
+        let changed = self.mutate_site(state, &mut candidate, &site)?;
+        if !changed || candidate == *input || candidate.target_bytes().len() > NYX_INPUT_BUFFER_SIZE
+        {
+            return Ok(MutationResult::Skipped);
+        }
+        *input = candidate;
+        Ok(MutationResult::Mutated)
     }
 
     fn post_exec(&mut self, _state: &mut S, _new_corpus_id: Option<CorpusId>) -> Result<(), Error> {
@@ -176,17 +202,23 @@ where
     }
 }
 
-fn load_dictionary_from_env() -> Result<Vec<String>, String> {
-    let Ok(path) = env::var("ATROPOS_MUTATION_DICT") else {
-        return Ok(Vec::new());
-    };
-    load_dictionary_file(&path)
+fn load_dictionary_paths(paths: &[std::path::PathBuf]) -> Result<Vec<String>, String> {
+    let mut tokens = Vec::new();
+    for path in paths {
+        let path = path.to_string_lossy();
+        for token in load_dictionary_file(path.as_ref())? {
+            if !tokens.iter().any(|existing| existing == &token) {
+                tokens.push(token);
+            }
+        }
+    }
+    Ok(tokens)
 }
 
 fn load_dictionary_file(path: &str) -> Result<Vec<String>, String> {
     // Preflight as UTF-8 so LibAFL's line parser cannot panic on an invalid file.
     fs::read_to_string(path)
-        .map_err(|err| format!("cannot read ATROPOS_MUTATION_DICT {path}: {err}"))?;
+        .map_err(|err| format!("cannot read mutation dictionary {path}: {err}"))?;
     let parsed = Tokens::from_file(path)
         .map_err(|err| format!("cannot parse AFL++ dictionary {path}: {err}"))?;
 
@@ -219,20 +251,764 @@ fn collect_key_candidates(operations: &[Operation], dictionary: &[String]) -> Ve
 
 fn collect_schema_keys(schema: &Schema, candidates: &mut Vec<String>) {
     match schema {
-        Schema::Object(fields) => {
-            for (key, child) in fields {
-                push_unique_key(candidates, key);
-                collect_schema_keys(child, candidates);
+        Schema::Object { fields, .. } => {
+            for field in fields {
+                push_unique_key(candidates, &field.name);
+                collect_schema_keys(&field.schema, candidates);
             }
         }
-        Schema::Array(item) => collect_schema_keys(item, candidates),
-        Schema::Any | Schema::Enum(_) | Schema::String | Schema::Number | Schema::Bool => {}
+        Schema::Array { items, .. } => collect_schema_keys(items, candidates),
+        Schema::Union { variants, .. } => {
+            for variant in variants {
+                collect_schema_keys(variant, candidates);
+            }
+        }
+        Schema::Any { .. }
+        | Schema::Enum { .. }
+        | Schema::String { .. }
+        | Schema::Number { .. }
+        | Schema::Bool { .. } => {}
     }
 }
 
 fn push_unique_key(candidates: &mut Vec<String>, key: &str) {
     if !candidates.iter().any(|candidate| candidate == key) {
         candidates.push(key.to_owned());
+    }
+}
+
+#[derive(Clone)]
+enum Site {
+    Scalar(Vec<usize>),
+    Object(Vec<usize>),
+    Array(Vec<usize>),
+    Query,
+    Header,
+    Cookie,
+    Path,
+    Crossover,
+}
+
+pub(crate) fn mutation_budget(site_count: usize) -> usize {
+    site_count.saturating_mul(2).clamp(BUDGET_MIN, BUDGET_MAX)
+}
+
+fn mutation_sites(input: &HttpInput, has_donor: bool) -> Vec<Site> {
+    let mut sites = Vec::new();
+    for path in input.body.value_paths() {
+        if matches!(
+            input.body.leaf_ref(&path),
+            Some(
+                JsonValue::String(_) | JsonValue::Number(_) | JsonValue::Bool(_) | JsonValue::Null
+            )
+        ) {
+            sites.push(Site::Scalar(path));
+        }
+    }
+    for path in input.body.object_paths() {
+        sites.push(Site::Object(path));
+    }
+    for path in input.body.array_paths() {
+        sites.push(Site::Array(path));
+    }
+    sites.push(Site::Query);
+    sites.push(Site::Header);
+    sites.push(Site::Cookie);
+    if !input.pin_route {
+        sites.push(Site::Path);
+    }
+    if has_donor {
+        sites.push(Site::Crossover);
+    }
+    sites
+}
+
+fn has_crossover_donor<S>(state: &S) -> Result<bool, Error>
+where
+    S: HasCorpus<HttpInput> + HasCurrentCorpusId,
+{
+    let Some(current_id) = state.current_corpus_id()? else {
+        return Ok(false);
+    };
+    Ok(state.corpus().ids().any(|id| id != current_id))
+}
+
+fn mutate_site<S>(
+    state: &mut S,
+    input: &mut HttpInput,
+    site: &Site,
+    operation: Option<&Operation>,
+    dictionary: &[String],
+    bug_triggers: &[String],
+    key_candidates: &[String],
+) -> Result<bool, Error>
+where
+    S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
+{
+    let changed = match site {
+        Site::Scalar(path) => {
+            mutate_scalar(state, input, path, operation, dictionary, bug_triggers)
+        }
+        Site::Object(path) => {
+            mutate_object(state, input, path, operation, dictionary, key_candidates)
+        }
+        Site::Array(path) => mutate_array_at(state, input, path, operation, dictionary),
+        Site::Query => mutate_metadata(
+            state,
+            input,
+            crate::openapi::ParameterLocation::Query,
+            operation,
+            dictionary,
+            bug_triggers,
+        ),
+        Site::Header => mutate_metadata(
+            state,
+            input,
+            crate::openapi::ParameterLocation::Header,
+            operation,
+            dictionary,
+            bug_triggers,
+        ),
+        Site::Cookie => mutate_metadata(
+            state,
+            input,
+            crate::openapi::ParameterLocation::Cookie,
+            operation,
+            dictionary,
+            bug_triggers,
+        ),
+        Site::Path => {
+            if wants_compliance(state, operation.and_then(|item| item.body.as_ref())) {
+                false
+            } else {
+                input.path.push_str("/x");
+                true
+            }
+        }
+        Site::Crossover => crossover_body_subtree(state, input)?,
+    };
+    Ok(changed)
+}
+
+fn wants_compliance<S: HasRand>(state: &mut S, schema: Option<&Schema>) -> bool {
+    schema.is_some() && state.rand_mut().coinflip(OPENAPI_COMPLIANCE_RATE)
+}
+
+fn body_schema<'a>(
+    operation: Option<&'a Operation>,
+    path: &[usize],
+    body: &JsonValue,
+) -> Option<&'a Schema> {
+    crate::openapi::schema_at(operation?.body.as_ref()?, path, body)
+}
+
+fn mutate_scalar<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    path: &[usize],
+    operation: Option<&Operation>,
+    dictionary: &[String],
+    bug_triggers: &[String],
+) -> bool {
+    let schema = body_schema(operation, path, &input.body);
+    if wants_compliance(state, schema) {
+        return mutate_scalar_compliant(
+            state,
+            input,
+            path,
+            schema.unwrap(),
+            dictionary,
+            bug_triggers,
+        );
+    }
+    if state.rand_mut().below_or_zero(2) == 0 {
+        return replace_json_kind(state, input, path, dictionary);
+    }
+    let Some(value) = input.body.leaf_mut(path) else {
+        return false;
+    };
+    let changed = match value {
+        JsonValue::String(bytes) => mutate_string_value(state, bytes, dictionary, bug_triggers),
+        JsonValue::Number(text) => mutate_number_value(state, text),
+        JsonValue::Bool(bit) => {
+            *bit = !*bit;
+            true
+        }
+        JsonValue::Null => false,
+        _ => false,
+    };
+    if changed {
+        input.body_override = None;
+    } else if matches!(input.body.leaf_ref(path), Some(JsonValue::Null)) {
+        return replace_json_kind(state, input, path, dictionary);
+    }
+    changed
+}
+
+fn mutate_scalar_compliant<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    path: &[usize],
+    schema: &Schema,
+    dictionary: &[String],
+    bug_triggers: &[String],
+) -> bool {
+    match schema {
+        Schema::Enum { values, style, .. } => {
+            let Some(current_value) = input.body.leaf_ref(path) else {
+                return false;
+            };
+            let current = crate::openapi::enum_current(*style, current_value);
+            let choices = values
+                .iter()
+                .filter(|choice| current.as_ref() != Some(*choice))
+                .cloned()
+                .collect::<Vec<_>>();
+            if choices.is_empty() {
+                return false;
+            }
+            let choice = choices[state.rand_mut().below_or_zero(choices.len())].clone();
+            let Some(slot) = input.body.leaf_mut(path) else {
+                return false;
+            };
+            *slot = crate::openapi::enum_json(*style, &choice);
+        }
+        Schema::String {
+            min_length,
+            max_length,
+            ..
+        } => {
+            let Some(JsonValue::String(bytes)) = input.body.leaf_mut(path) else {
+                let Some(slot) = input.body.leaf_mut(path) else {
+                    return false;
+                };
+                *slot = JsonValue::String(bounded_string(state, *min_length, *max_length));
+                input.body_override = None;
+                return true;
+            };
+            let saved = bytes.clone();
+            if !mutate_string_value(state, bytes, dictionary, bug_triggers)
+                || !length_ok(*min_length, *max_length, bytes.len())
+            {
+                *bytes = saved;
+                return false;
+            }
+        }
+        Schema::Number {
+            integer,
+            minimum,
+            maximum,
+            ..
+        } => {
+            let Some(JsonValue::Number(text)) = input.body.leaf_mut(path) else {
+                let Some(slot) = input.body.leaf_mut(path) else {
+                    return false;
+                };
+                *slot = crate::openapi::sample_value(schema);
+                input.body_override = None;
+                return true;
+            };
+            let saved = text.clone();
+            mutate_number_value(state, text);
+            if !crate::openapi::number_in_range(*minimum, *maximum, *integer, text) {
+                let choices =
+                    crate::openapi::boundary_numbers(*integer, *minimum, *maximum, &saved);
+                if choices.is_empty() {
+                    *text = saved;
+                    return false;
+                }
+                *text = choices[state.rand_mut().below_or_zero(choices.len())].clone();
+            }
+        }
+        Schema::Bool { .. } => {
+            let Some(JsonValue::Bool(bit)) = input.body.leaf_mut(path) else {
+                let Some(slot) = input.body.leaf_mut(path) else {
+                    return false;
+                };
+                *slot = JsonValue::Bool(false);
+                input.body_override = None;
+                return true;
+            };
+            *bit = !*bit;
+        }
+        _ => {
+            let replacement = crate::openapi::sample_value(schema);
+            let Some(slot) = input.body.leaf_mut(path) else {
+                return false;
+            };
+            if *slot == replacement {
+                return false;
+            }
+            *slot = replacement;
+        }
+    }
+    input.body_override = None;
+    true
+}
+
+fn length_ok(min_length: Option<usize>, max_length: Option<usize>, len: usize) -> bool {
+    min_length.is_none_or(|min_length| len >= min_length)
+        && max_length.is_none_or(|max_length| len <= max_length)
+}
+
+fn bounded_string<S: HasRand>(
+    state: &mut S,
+    min_length: Option<usize>,
+    max_length: Option<usize>,
+) -> Vec<u8> {
+    let min_length = min_length.unwrap_or(0);
+    let max_length = max_length.unwrap_or(min_length.max(8)).max(min_length);
+    let len = if max_length == min_length {
+        min_length
+    } else {
+        min_length + state.rand_mut().below_or_zero(max_length - min_length + 1)
+    };
+    printable_run(state, len.max(1))
+}
+
+fn replace_json_kind<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    path: &[usize],
+    dictionary: &[String],
+) -> bool {
+    let Some(current) = input.body.leaf_ref(path) else {
+        return false;
+    };
+    let replacement = random_different_json(state, current, dictionary);
+    if let Some(value) = input.body.leaf_mut(path) {
+        *value = replacement;
+        input.body_override = None;
+        true
+    } else {
+        false
+    }
+}
+
+fn mutate_object<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    path: &[usize],
+    operation: Option<&Operation>,
+    dictionary: &[String],
+    key_candidates: &[String],
+) -> bool {
+    let schema = body_schema(operation, path, &input.body);
+    if wants_compliance(state, schema) {
+        return mutate_object_compliant(state, input, path, schema.unwrap());
+    }
+    let nonempty = matches!(
+        input.body.leaf_ref(path),
+        Some(JsonValue::Object(fields)) if !fields.is_empty()
+    );
+    let mut choices = vec![ObjectOp::Insert, ObjectOp::NestNew];
+    if nonempty {
+        choices.extend([ObjectOp::Remove, ObjectOp::Rename, ObjectOp::NestExisting]);
+    }
+    match choices[state.rand_mut().below_or_zero(choices.len())] {
+        ObjectOp::Insert => insert_key_at(state, input, path, dictionary, key_candidates),
+        ObjectOp::Remove => remove_key_at(state, input, path),
+        ObjectOp::Rename => rename_key_at(state, input, path, key_candidates),
+        ObjectOp::NestNew => nest_new_at(state, input, path, key_candidates),
+        ObjectOp::NestExisting => nest_existing_at(state, input, path),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ObjectOp {
+    Insert,
+    Remove,
+    Rename,
+    NestNew,
+    NestExisting,
+}
+
+fn mutate_object_compliant<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    path: &[usize],
+    schema: &Schema,
+) -> bool {
+    let Schema::Object { fields, .. } = schema else {
+        return false;
+    };
+    let Some(JsonValue::Object(current)) = input.body.leaf_ref(path) else {
+        return false;
+    };
+    let missing = fields
+        .iter()
+        .filter(|field| !current.iter().any(|(name, _)| name == &field.name))
+        .collect::<Vec<_>>();
+    let removable = current
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| {
+            fields
+                .iter()
+                .find(|field| &field.name == name)
+                .is_none_or(|field| !field.required)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if missing.is_empty() && removable.is_empty() {
+        return false;
+    }
+    let insert =
+        !missing.is_empty() && (removable.is_empty() || state.rand_mut().below_or_zero(2) == 0);
+    if insert {
+        let field = &missing[state.rand_mut().below_or_zero(missing.len())];
+        let name = field.name.clone();
+        let value = crate::openapi::sample_value(&field.schema);
+        let Some(slots) = input.body.object_fields_mut(path) else {
+            return false;
+        };
+        if slots.iter().any(|(existing, _)| existing == &name) {
+            return false;
+        }
+        slots.push((name, value));
+    } else {
+        let index = removable[state.rand_mut().below_or_zero(removable.len())];
+        let Some(slots) = input.body.object_fields_mut(path) else {
+            return false;
+        };
+        if index >= slots.len() {
+            return false;
+        }
+        let name = slots[index].0.clone();
+        if fields
+            .iter()
+            .any(|field| field.name == name && field.required)
+        {
+            return false;
+        }
+        slots.remove(index);
+    }
+    input.body_override = None;
+    true
+}
+
+fn insert_key_at<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    path: &[usize],
+    dictionary: &[String],
+    key_candidates: &[String],
+) -> bool {
+    let key = candidate_key(state, key_candidates);
+    let Some(fields) = input.body.object_fields_mut(path) else {
+        return false;
+    };
+    if fields.iter().any(|(name, _)| name == &key) {
+        return false;
+    }
+    fields.push((
+        key,
+        JsonValue::String(random_string_bytes(state, dictionary)),
+    ));
+    input.body_override = None;
+    true
+}
+
+fn remove_key_at<S: HasRand>(state: &mut S, input: &mut HttpInput, path: &[usize]) -> bool {
+    let Some(fields) = input.body.object_fields_mut(path) else {
+        return false;
+    };
+    if fields.is_empty() {
+        return false;
+    }
+    fields.remove(state.rand_mut().below_or_zero(fields.len()));
+    input.body_override = None;
+    true
+}
+
+fn rename_key_at<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    path: &[usize],
+    key_candidates: &[String],
+) -> bool {
+    let field_index = match input.body.leaf_ref(path) {
+        Some(JsonValue::Object(fields)) if !fields.is_empty() => {
+            state.rand_mut().below_or_zero(fields.len())
+        }
+        _ => return false,
+    };
+    let key = candidate_key(state, key_candidates);
+    let Some(fields) = input.body.object_fields_mut(path) else {
+        return false;
+    };
+    if fields
+        .iter()
+        .enumerate()
+        .any(|(index, (name, _))| index != field_index && name == &key)
+        || fields[field_index].0 == key
+    {
+        return false;
+    }
+    fields[field_index].0 = key;
+    input.body_override = None;
+    true
+}
+
+fn nest_new_at<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    path: &[usize],
+    key_candidates: &[String],
+) -> bool {
+    let Some(JsonValue::Object(_)) = input.body.leaf_ref(path) else {
+        return false;
+    };
+    let snapshot = input.body.leaf_ref(path).cloned().unwrap();
+    let key = candidate_key(state, key_candidates);
+    let Some(fields) = input.body.object_fields_mut(path) else {
+        return false;
+    };
+    if fields.iter().any(|(name, _)| name == &key) {
+        return false;
+    }
+    fields.push((key, snapshot));
+    input.body_override = None;
+    true
+}
+
+fn nest_existing_at<S: HasRand>(state: &mut S, input: &mut HttpInput, path: &[usize]) -> bool {
+    let Some(JsonValue::Object(fields)) = input.body.leaf_ref(path) else {
+        return false;
+    };
+    if fields.is_empty() {
+        return false;
+    }
+    let snapshot = input.body.leaf_ref(path).cloned().unwrap();
+    let index = state.rand_mut().below_or_zero(fields.len());
+    let Some(fields) = input.body.object_fields_mut(path) else {
+        return false;
+    };
+    if fields[index].1 == snapshot {
+        return false;
+    }
+    fields[index].1 = snapshot;
+    input.body_override = None;
+    true
+}
+
+fn mutate_array_at<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    path: &[usize],
+    operation: Option<&Operation>,
+    dictionary: &[String],
+) -> bool {
+    let schema = body_schema(operation, path, &input.body);
+    if wants_compliance(state, schema) {
+        return mutate_array_compliant(state, input, path, schema.unwrap());
+    }
+    mutate_array_free(state, input, path, dictionary)
+}
+
+fn mutate_array_compliant<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    path: &[usize],
+    schema: &Schema,
+) -> bool {
+    let Schema::Array {
+        items,
+        min_items,
+        max_items,
+        ..
+    } = schema
+    else {
+        return false;
+    };
+    let len = match input.body.leaf_ref(path) {
+        Some(JsonValue::Array(values)) => values.len(),
+        _ => return false,
+    };
+    let min_items = min_items.unwrap_or(0);
+    let can_remove = len > min_items;
+    let can_add = max_items.is_none_or(|max_items| len < max_items);
+    let mut choices = Vec::new();
+    if can_remove {
+        choices.push(0);
+    }
+    if can_add {
+        choices.push(1);
+        if len > 0 {
+            choices.push(2);
+        }
+    }
+    if choices.is_empty() {
+        return false;
+    }
+    match choices[state.rand_mut().below_or_zero(choices.len())] {
+        0 => {
+            let index = state.rand_mut().below_or_zero(len);
+            let Some(values) = input.body.array_items_mut(path) else {
+                return false;
+            };
+            values.remove(index);
+        }
+        1 => {
+            let value = crate::openapi::sample_value(items);
+            let index = state.rand_mut().below_or_zero(len + 1);
+            let Some(values) = input.body.array_items_mut(path) else {
+                return false;
+            };
+            values.insert(index, value);
+        }
+        _ => {
+            let index = state.rand_mut().below_or_zero(len);
+            let Some(JsonValue::Array(values)) = input.body.leaf_ref(path) else {
+                return false;
+            };
+            let copy = values[index].clone();
+            let Some(values) = input.body.array_items_mut(path) else {
+                return false;
+            };
+            values.insert(index + 1, copy);
+        }
+    }
+    input.body_override = None;
+    true
+}
+
+fn mutate_metadata<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    location: crate::openapi::ParameterLocation,
+    operation: Option<&Operation>,
+    dictionary: &[String],
+    bug_triggers: &[String],
+) -> bool {
+    let parameters = operation
+        .map(|operation| {
+            operation
+                .parameters
+                .iter()
+                .filter(|parameter| parameter.location == location)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let schema_present = !parameters.is_empty();
+    let pairs = pair_list_mut(input, location);
+    if schema_present && state.rand_mut().coinflip(OPENAPI_COMPLIANCE_RATE) {
+        return mutate_pairs_compliant(state, pairs, &parameters);
+    }
+    mutate_pair_list(state, pairs, dictionary, bug_triggers)
+}
+
+fn pair_list_mut(
+    input: &mut HttpInput,
+    location: crate::openapi::ParameterLocation,
+) -> &mut Vec<(String, Vec<u8>)> {
+    match location {
+        crate::openapi::ParameterLocation::Query => &mut input.query,
+        crate::openapi::ParameterLocation::Header => &mut input.headers,
+        crate::openapi::ParameterLocation::Cookie => &mut input.cookies,
+    }
+}
+
+fn mutate_pairs_compliant<S: HasRand>(
+    state: &mut S,
+    pairs: &mut Vec<(String, Vec<u8>)>,
+    parameters: &[&crate::openapi::Parameter],
+) -> bool {
+    let missing = parameters
+        .iter()
+        .filter(|parameter| {
+            !pairs.iter().any(|(name, _)| {
+                if matches!(
+                    parameter.location,
+                    crate::openapi::ParameterLocation::Header
+                ) {
+                    name.eq_ignore_ascii_case(&parameter.name)
+                } else {
+                    *name == parameter.name
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let removable = pairs
+        .iter()
+        .enumerate()
+        .filter(|(_, (name, _))| {
+            parameters
+                .iter()
+                .find(|parameter| {
+                    if matches!(
+                        parameter.location,
+                        crate::openapi::ParameterLocation::Header
+                    ) {
+                        name.eq_ignore_ascii_case(&parameter.name)
+                    } else {
+                        *name == parameter.name
+                    }
+                })
+                .is_none_or(|parameter| !parameter.required)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let mut choices = Vec::new();
+    if !missing.is_empty() {
+        choices.push(0);
+    }
+    if !removable.is_empty() {
+        choices.push(1);
+    }
+    if !pairs.is_empty() {
+        choices.push(2);
+    }
+    if choices.is_empty() {
+        return false;
+    }
+    match choices[state.rand_mut().below_or_zero(choices.len())] {
+        0 => {
+            let parameter = missing[state.rand_mut().below_or_zero(missing.len())];
+            let value = parameter_bytes(&crate::openapi::sample_value(&parameter.schema));
+            pairs.push((parameter.name.clone(), value));
+        }
+        1 => {
+            let index = removable[state.rand_mut().below_or_zero(removable.len())];
+            pairs.remove(index);
+        }
+        _ => {
+            let index = state.rand_mut().below_or_zero(pairs.len());
+            let name = pairs[index].0.clone();
+            let parameter = parameters.iter().find(|parameter| {
+                if matches!(
+                    parameter.location,
+                    crate::openapi::ParameterLocation::Header
+                ) {
+                    name.eq_ignore_ascii_case(&parameter.name)
+                } else {
+                    name == parameter.name
+                }
+            });
+            let Some(parameter) = parameter else {
+                return false;
+            };
+            pairs[index].1 = parameter_bytes(&crate::openapi::sample_value(&parameter.schema));
+            if pairs[index].1.is_empty() && matches!(parameter.schema, Schema::String { .. }) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn parameter_bytes(value: &JsonValue) -> Vec<u8> {
+    match value {
+        JsonValue::String(bytes) => bytes.clone(),
+        JsonValue::Number(text) => text.as_bytes().to_vec(),
+        JsonValue::Bool(true) => b"true".to_vec(),
+        JsonValue::Bool(false) => b"false".to_vec(),
+        JsonValue::Null => b"null".to_vec(),
+        other => {
+            let mut out = Vec::new();
+            other.write_json(&mut out);
+            out
+        }
     }
 }
 
@@ -297,31 +1073,6 @@ where
         }
     }
     Ok(operations)
-}
-
-fn mutate_one<S>(
-    state: &mut S,
-    input: &mut HttpInput,
-    openapi_operations: &[Operation],
-    dictionary: &[String],
-    key_candidates: &[String],
-) -> Result<MutationResult, Error>
-where
-    S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
-{
-    let operations = applicable_operations(state, input)?;
-    if operations.is_empty() {
-        return Ok(MutationResult::Skipped);
-    }
-    let op = operations[state.rand_mut().below_or_zero(operations.len())];
-    apply_with_size_limit(
-        state,
-        input,
-        Some(op),
-        openapi_operations,
-        dictionary,
-        key_candidates,
-    )
 }
 
 fn apply_with_size_limit<S>(
@@ -436,7 +1187,7 @@ fn mutate_body_string<S: HasRand>(
         return false;
     };
     let changed = match value {
-        JsonValue::String(bytes) => mutate_string_value(state, bytes, dictionary),
+        JsonValue::String(bytes) => mutate_string_value(state, bytes, dictionary, &[]),
         JsonValue::Number(text) => mutate_number_value(state, text),
         _ => false,
     };
@@ -450,40 +1201,69 @@ fn enum_for(schema: Option<&Schema>, path: &[usize], body: &JsonValue) -> Option
     let mut schema = schema?;
     let mut node = body;
     for index in path {
+        schema = crate::openapi::peel_union(schema, node)?;
         match (schema, node) {
-            (Schema::Object(fields), JsonValue::Object(values)) => {
-                schema = &fields.get(*index)?.1;
-                node = &values.get(*index)?.1;
+            (Schema::Object { fields, .. }, JsonValue::Object(values)) => {
+                let (name, child) = values.get(*index)?;
+                schema = &fields.iter().find(|field| &field.name == name)?.schema;
+                node = child;
             }
-            (Schema::Array(item), JsonValue::Array(values)) => {
-                schema = item;
+            (Schema::Array { items, .. }, JsonValue::Array(values)) => {
+                schema = items;
                 node = values.get(*index)?;
             }
             _ => return None,
         }
     }
+    schema = crate::openapi::peel_union(schema, node)?;
     match schema {
-        Schema::Enum(choices) => Some(choices.clone()),
+        Schema::Enum { values, .. } => Some(values.clone()),
         _ => None,
     }
 }
 
-fn mutate_string_value<S: HasRand>(
+pub(crate) fn mutate_string_value<S: HasRand>(
     state: &mut S,
     bytes: &mut Vec<u8>,
     dictionary: &[String],
+    bug_triggers: &[String],
 ) -> bool {
-    if !dictionary.is_empty() && state.rand_mut().below_or_zero(2) == 0 {
-        let token = dictionary[state.rand_mut().below_or_zero(dictionary.len())].as_bytes();
-        if state.rand_mut().below_or_zero(2) == 0 {
-            let offset = state.rand_mut().below_or_zero(bytes.len() + 1);
-            bytes.splice(offset..offset, token.iter().copied());
-        } else {
-            *bytes = token.to_vec();
-        }
-        return true;
+    let mut sources = vec![StringSource::Havoc];
+    if !dictionary.is_empty() {
+        sources.push(StringSource::Dictionary);
     }
-    havoc_bytes(state, bytes)
+    if !bug_triggers.is_empty() {
+        sources.push(StringSource::BugTrigger);
+    }
+    match sources[state.rand_mut().below_or_zero(sources.len())] {
+        StringSource::Dictionary => splice_or_replace(state, bytes, dictionary),
+        StringSource::BugTrigger => splice_or_replace(state, bytes, bug_triggers),
+        StringSource::Havoc => havoc_bytes(state, bytes),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StringSource {
+    Havoc,
+    Dictionary,
+    BugTrigger,
+}
+
+fn splice_or_replace<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>, tokens: &[String]) -> bool {
+    if tokens.is_empty() {
+        return false;
+    }
+    let token = tokens[state.rand_mut().below_or_zero(tokens.len())].as_bytes();
+    if token.is_empty() {
+        return false;
+    }
+    if state.rand_mut().below_or_zero(2) == 0 {
+        let offset = state.rand_mut().below_or_zero(bytes.len() + 1);
+        bytes.splice(offset..offset, token.iter().copied());
+    } else {
+        *bytes = token.to_vec();
+    }
+    true
 }
 
 fn mutate_body_number<S: HasRand>(state: &mut S, input: &mut HttpInput) -> bool {
@@ -506,7 +1286,7 @@ fn mutate_body_number<S: HasRand>(state: &mut S, input: &mut HttpInput) -> bool 
     changed
 }
 
-fn mutate_number_value<S: HasRand>(state: &mut S, text: &mut String) -> bool {
+pub(crate) fn mutate_number_value<S: HasRand>(state: &mut S, text: &mut String) -> bool {
     if state.rand_mut().below_or_zero(3) == 0 {
         let edge = NUMBER_EDGES[state.rand_mut().below_or_zero(NUMBER_EDGES.len())];
         if text == edge {
@@ -625,6 +1405,27 @@ fn json_kind(value: &JsonValue) -> JsonKind {
     }
 }
 
+pub(crate) fn random_different_json<S: HasRand>(
+    state: &mut S,
+    current: &JsonValue,
+    dictionary: &[String],
+) -> JsonValue {
+    let kind = json_kind(current);
+    let kinds = [
+        JsonKind::Null,
+        JsonKind::Bool,
+        JsonKind::Number,
+        JsonKind::String,
+        JsonKind::Array,
+        JsonKind::Object,
+    ]
+    .into_iter()
+    .filter(|candidate| *candidate != kind)
+    .collect::<Vec<_>>();
+    let next = kinds[state.rand_mut().below_or_zero(kinds.len())];
+    random_value_of_kind(state, next, dictionary)
+}
+
 fn random_value_of_kind<S: HasRand>(
     state: &mut S,
     kind: JsonKind,
@@ -642,13 +1443,14 @@ fn random_value_of_kind<S: HasRand>(
     }
 }
 
-fn random_string_bytes<S: HasRand>(state: &mut S, dictionary: &[String]) -> Vec<u8> {
+pub(crate) fn random_string_bytes<S: HasRand>(state: &mut S, dictionary: &[String]) -> Vec<u8> {
     if !dictionary.is_empty() && state.rand_mut().below_or_zero(2) == 0 {
         dictionary[state.rand_mut().below_or_zero(dictionary.len())]
             .as_bytes()
             .to_vec()
     } else {
-        CANARIES[state.rand_mut().below_or_zero(CANARIES.len())].to_vec()
+        let len = 1 + state.rand_mut().below_or_zero(8);
+        printable_run(state, len)
     }
 }
 
@@ -755,7 +1557,16 @@ fn mutate_array<S: HasRand>(state: &mut S, input: &mut HttpInput, dictionary: &[
     let Some(path) = choose_path(state, &paths) else {
         return false;
     };
-    let len = match input.body.leaf_ref(&path) {
+    mutate_array_free(state, input, &path, dictionary)
+}
+
+fn mutate_array_free<S: HasRand>(
+    state: &mut S,
+    input: &mut HttpInput,
+    path: &[usize],
+    dictionary: &[String],
+) -> bool {
+    let len = match input.body.leaf_ref(path) {
         Some(JsonValue::Array(items)) => items.len(),
         _ => return false,
     };
@@ -940,9 +1751,9 @@ fn mutate_http_metadata<S: HasRand>(
     dictionary: &[String],
 ) -> bool {
     match state.rand_mut().below_or_zero(3) {
-        0 => mutate_pair_list(state, &mut input.query, dictionary),
-        1 => mutate_pair_list(state, &mut input.headers, dictionary),
-        _ => mutate_pair_list(state, &mut input.cookies, dictionary),
+        0 => mutate_pair_list(state, &mut input.query, dictionary, &[]),
+        1 => mutate_pair_list(state, &mut input.headers, dictionary, &[]),
+        _ => mutate_pair_list(state, &mut input.cookies, dictionary, &[]),
     }
 }
 
@@ -950,6 +1761,7 @@ fn mutate_pair_list<S: HasRand>(
     state: &mut S,
     pairs: &mut Vec<(String, Vec<u8>)>,
     dictionary: &[String],
+    bug_triggers: &[String],
 ) -> bool {
     #[derive(Clone, Copy)]
     enum PairOp {
@@ -989,7 +1801,7 @@ fn mutate_pair_list<S: HasRand>(
         }
         PairOp::Value => {
             let index = state.rand_mut().below_or_zero(pairs.len());
-            return mutate_string_value(state, &mut pairs[index].1, dictionary);
+            return mutate_string_value(state, &mut pairs[index].1, dictionary, bug_triggers);
         }
     }
     true
@@ -1042,32 +1854,109 @@ fn inject_malformed_body(input: &mut HttpInput) -> bool {
     true
 }
 
-fn havoc_bytes<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>) -> bool {
-    let roll = state.rand_mut().below_or_zero(10);
-    if roll == 3 {
-        *bytes = CANARIES[state.rand_mut().below_or_zero(CANARIES.len())].to_vec();
+pub(crate) fn havoc_bytes<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>) -> bool {
+    if bytes.is_empty() {
+        append_bytes(state, bytes);
         return true;
     }
-    if bytes.is_empty() || roll == 4 {
-        bytes.push(printable(state));
-        return true;
-    }
-    match state.rand_mut().below_or_zero(4) {
-        0 => {
-            let index = state.rand_mut().below_or_zero(bytes.len());
-            bytes[index] = printable(state);
-        }
-        1 => {
-            let index = state.rand_mut().below_or_zero(bytes.len());
-            bytes.insert(index, printable(state));
-        }
-        2 => {
-            let index = state.rand_mut().below_or_zero(bytes.len());
-            bytes.remove(index);
-        }
-        _ => bytes.push(printable(state)),
+    match state.rand_mut().below_or_zero(3) {
+        0 => append_bytes(state, bytes),
+        1 => replace_bytes(state, bytes),
+        _ => remove_bytes(state, bytes),
     }
     true
+}
+
+fn append_bytes<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>) {
+    let len = 1 + state.rand_mut().below_or_zero(8);
+    let payload = printable_run(state, len);
+    if state.rand_mut().below_or_zero(4) != 0 {
+        bytes.push(DELIMITERS[state.rand_mut().below_or_zero(DELIMITERS.len())]);
+    }
+    bytes.extend(payload);
+}
+
+fn replace_bytes<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>) {
+    let delimiter_positions = bytes
+        .iter()
+        .enumerate()
+        .filter(|(_, byte)| DELIMITERS.contains(byte))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if !delimiter_positions.is_empty() {
+        match state.rand_mut().below_or_zero(4) {
+            0 | 1 => {
+                if replace_token(state, bytes) {
+                    return;
+                }
+            }
+            2 => {
+                replace_delimiter_span(state, bytes, &delimiter_positions);
+                return;
+            }
+            _ => {}
+        }
+    }
+    replace_span(state, bytes);
+}
+
+fn replace_token<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>) -> bool {
+    let mut tokens = Vec::new();
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if DELIMITERS.contains(byte) {
+            if start < index {
+                tokens.push(start..index);
+            }
+            start = index + 1;
+        }
+    }
+    if start < bytes.len() {
+        tokens.push(start..bytes.len());
+    }
+    if tokens.is_empty() {
+        return false;
+    }
+    let range = tokens[state.rand_mut().below_or_zero(tokens.len())].clone();
+    bytes.splice(range, std::iter::once(printable(state)));
+    true
+}
+
+fn replace_delimiter_span<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>, positions: &[usize]) {
+    let start = positions[state.rand_mut().below_or_zero(positions.len())];
+    let delimiter = bytes[start];
+    let end = bytes
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .find(|(_, byte)| **byte == delimiter)
+        .map(|(index, _)| index)
+        .unwrap_or(bytes.len());
+    let len = 1 + state.rand_mut().below_or_zero(8);
+    let payload = printable_run(state, len);
+    bytes.splice(start..end, payload);
+}
+
+fn replace_span<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>) {
+    let start = state.rand_mut().below_or_zero(bytes.len());
+    let len = 1 + state.rand_mut().below_or_zero(bytes.len() - start);
+    let payload_len = 1 + state.rand_mut().below_or_zero(8);
+    let payload = printable_run(state, payload_len);
+    bytes.splice(start..start + len, payload);
+}
+
+fn remove_bytes<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>) {
+    let start = state.rand_mut().below_or_zero(bytes.len());
+    if state.rand_mut().below_or_zero(2) == 0 {
+        bytes.truncate(start);
+    } else {
+        let end = start + state.rand_mut().below_or_zero(bytes.len() - start);
+        bytes.drain(start..=end);
+    }
+}
+
+fn printable_run<S: HasRand>(state: &mut S, len: usize) -> Vec<u8> {
+    (0..len.max(1)).map(|_| printable(state)).collect()
 }
 
 fn choose_path<S: HasRand, T: Clone>(state: &mut S, paths: &[T]) -> Option<T> {
@@ -1179,6 +2068,24 @@ mod tests {
     }
 
     #[test]
+    fn loads_dictionary_paths_and_dedups_tokens() {
+        let first = temporary_dictionary("validation=\"normal\"\nmethod=\"POST\"\n");
+        let second = temporary_dictionary("method=\"POST\"\npath=\"/wp/v2/posts\"\n");
+        let tokens = load_dictionary_paths(&[first.clone(), second.clone()]).unwrap();
+        fs::remove_file(&first).unwrap();
+        fs::remove_file(&second).unwrap();
+
+        assert_eq!(
+            tokens,
+            vec![
+                "normal".to_string(),
+                "POST".to_string(),
+                "/wp/v2/posts".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn reports_malformed_dictionary() {
         let path = temporary_dictionary("this is not a dictionary entry\n");
         let result = load_dictionary_file(path.to_str().unwrap());
@@ -1203,9 +2110,11 @@ mod tests {
 
     #[test]
     fn seed_tokens_join_the_dictionary_and_key_candidates() {
-        let mutator = DeterministicMutator::new(
+        let mutator = InputMutator::new(
             Vec::new(),
             &["title".to_string(), "seed".to_string(), "title".to_string()],
+            &[],
+            &[],
         )
         .unwrap();
         assert!(mutator.dictionary.iter().any(|token| token == "title"));
@@ -1228,7 +2137,7 @@ mod tests {
         let mut observed = false;
         for _ in 0..64 {
             let mut value = b"old".to_vec();
-            mutate_string_value(&mut state, &mut value, std::slice::from_ref(&token));
+            mutate_string_value(&mut state, &mut value, std::slice::from_ref(&token), &[]);
             if value
                 .windows(token.len())
                 .any(|window| window == token.as_bytes())
@@ -1399,5 +2308,174 @@ mod tests {
         .unwrap();
         assert!(matches!(result, MutationResult::Skipped));
         assert_eq!(input, original);
+    }
+
+    #[test]
+    fn mutation_budget_scales_with_sites_and_stays_in_bounds() {
+        assert_eq!(mutation_budget(0), 8);
+        assert_eq!(mutation_budget(3), 8);
+        assert_eq!(mutation_budget(10), 20);
+        assert_eq!(mutation_budget(100), 64);
+    }
+
+    #[test]
+    fn each_candidate_changes_only_one_site() {
+        let mut state = TestState::new(4);
+        let mut mutator = InputMutator::new(Vec::new(), &[], &[], &[]).unwrap();
+        let input = input_with_body(JsonValue::String(b"hello/world".to_vec()));
+        let candidates = mutator.mutation_inputs(&mut state, &input).unwrap();
+        assert!(!candidates.is_empty());
+        for candidate in candidates {
+            let body_changed =
+                candidate.body != input.body || candidate.body_override != input.body_override;
+            let query_changed = candidate.query != input.query;
+            let header_changed = candidate.headers != input.headers;
+            let cookie_changed = candidate.cookies != input.cookies;
+            let path_changed = candidate.path != input.path;
+            let changes = [
+                body_changed,
+                query_changed,
+                header_changed,
+                cookie_changed,
+                path_changed,
+            ]
+            .into_iter()
+            .filter(|changed| *changed)
+            .count();
+            assert_eq!(changes, 1);
+        }
+    }
+
+    #[test]
+    fn compliant_object_mutation_keeps_required_keys() {
+        let mut state = TestState::new(9);
+        let schema = Schema::Object {
+            nullable: false,
+            fields: vec![
+                crate::openapi::Field {
+                    name: "keep".to_string(),
+                    required: true,
+                    schema: Schema::String {
+                        min_length: None,
+                        max_length: None,
+                        nullable: false,
+                    },
+                },
+                crate::openapi::Field {
+                    name: "drop".to_string(),
+                    required: false,
+                    schema: Schema::String {
+                        min_length: None,
+                        max_length: None,
+                        nullable: false,
+                    },
+                },
+            ],
+        };
+        let original = JsonValue::Object(vec![
+            ("keep".to_string(), JsonValue::String(b"a".to_vec())),
+            ("drop".to_string(), JsonValue::String(b"b".to_vec())),
+        ]);
+        let mut removed_optional = false;
+        for _ in 0..32 {
+            let mut input = input_with_body(original.clone());
+            assert!(mutate_object_compliant(
+                &mut state,
+                &mut input,
+                &[],
+                &schema
+            ));
+            let JsonValue::Object(fields) = &input.body else {
+                panic!("object required");
+            };
+            assert!(fields.iter().any(|(name, _)| name == "keep"));
+            if !fields.iter().any(|(name, _)| name == "drop") {
+                removed_optional = true;
+            }
+        }
+        assert!(removed_optional);
+    }
+
+    #[test]
+    fn compliant_enum_replaces_the_current_value() {
+        let mut state = TestState::new(3);
+        let schema = Schema::Enum {
+            values: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            nullable: false,
+            style: crate::openapi::EnumStyle::Text,
+        };
+        let mut input = input_with_body(JsonValue::String(b"a".to_vec()));
+        assert!(mutate_scalar_compliant(
+            &mut state,
+            &mut input,
+            &[],
+            &schema,
+            &[],
+            &[]
+        ));
+        match input.body {
+            JsonValue::String(bytes) => {
+                assert!(bytes == b"b" || bytes == b"c");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bug_trigger_is_inserted_or_replaces_the_string() {
+        let mut state = TestState::new(12);
+        let trigger = "TRIGGER".to_string();
+        let mut inserted = false;
+        let mut replaced = false;
+        for _ in 0..80 {
+            let mut value = b"old".to_vec();
+            assert!(mutate_string_value(
+                &mut state,
+                &mut value,
+                &[],
+                std::slice::from_ref(&trigger)
+            ));
+            if value == trigger.as_bytes() {
+                replaced = true;
+            } else if value
+                .windows(trigger.len())
+                .any(|window| window == trigger.as_bytes())
+            {
+                inserted = true;
+            }
+            if inserted && replaced {
+                break;
+            }
+        }
+        assert!(inserted);
+        assert!(replaced);
+    }
+
+    #[test]
+    fn havoc_appends_replaces_tokens_and_removes_spans() {
+        let mut state = TestState::new(18);
+        let original = b"alpha/beta/gamma".to_vec();
+        let mut appended = false;
+        let mut token_replaced = false;
+        let mut removed = false;
+        for _ in 0..120 {
+            let mut value = original.clone();
+            havoc_bytes(&mut state, &mut value);
+            if value.len() > original.len() && value.starts_with(&original[..5]) {
+                appended = true;
+            }
+            if value.len() < original.len() {
+                removed = true;
+            }
+            if value != original
+                && value.len() <= original.len()
+                && value.iter().any(|byte| DELIMITERS.contains(byte))
+            {
+                token_replaced = true;
+            }
+        }
+        assert!(appended);
+        assert!(token_replaced);
+        assert!(removed);
     }
 }

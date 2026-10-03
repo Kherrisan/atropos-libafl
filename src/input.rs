@@ -1,5 +1,10 @@
-use libafl::inputs::{HasTargetBytes, Input};
-use libafl_bolts::ownedref::OwnedSlice;
+use std::path::Path;
+
+use libafl::{
+    inputs::{HasTargetBytes, Input},
+    Error,
+};
+use libafl_bolts::{fs::write_file_atomic, ownedref::OwnedSlice};
 use serde::{Deserialize, Serialize};
 
 /// Keep the Nyx input buffer and structured-mutator limit in sync.
@@ -234,7 +239,23 @@ pub struct HttpInput {
     pub coverage_dump: bool,
 }
 
-impl Input for HttpInput {}
+impl Input for HttpInput {
+    fn to_file<P>(&self, path: P) -> Result<(), Error>
+    where
+        P: AsRef<Path>,
+    {
+        let path = path.as_ref();
+        let bytes = postcard::to_allocvec(self)
+            .map_err(|err| Error::serialize(format!("HttpInput postcard: {err}")))?;
+        write_file_atomic(path, &bytes)?;
+
+        // Viewing copy only. The fuzzer reloads the postcard file next to it.
+        let mut json = serde_json::to_vec_pretty(&self.plaintext_json())
+            .map_err(|err| Error::serialize(format!("HttpInput plaintext: {err}")))?;
+        json.push(b'\n');
+        write_file_atomic(path.with_extension("json"), &json)
+    }
+}
 
 impl HasTargetBytes for HttpInput {
     fn target_bytes(&self) -> OwnedSlice<'_, u8> {
@@ -277,6 +298,24 @@ impl HttpInput {
 
     pub fn content_type(&self) -> &'static str {
         "application/json"
+    }
+
+    /// Human-readable request. This is not a second corpus format.
+    pub(crate) fn plaintext_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "method": self.method,
+            "path": self.path,
+            "query": pairs_plain(&self.query),
+            "headers": pairs_plain(&self.headers),
+            "cookies": pairs_plain(&self.cookies),
+            "body": json_value_plain(&self.body),
+            "body_override": self.body_override.as_deref().map(override_plain),
+            "operation_key": self.operation_key,
+            "pin_route": self.pin_route,
+            "exec_limit": self.exec_limit,
+            "redqueen": self.redqueen,
+            "coverage_dump": self.coverage_dump,
+        })
     }
 
     pub fn body_bytes(&self) -> Vec<u8> {
@@ -375,6 +414,36 @@ impl HttpInput {
 
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).replace('\0', "")
+}
+
+fn json_value_plain(value: &JsonValue) -> serde_json::Value {
+    let mut bytes = Vec::new();
+    value.write_json(&mut bytes);
+    serde_json::from_slice(&bytes)
+        .unwrap_or_else(|_| serde_json::Value::String(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
+fn override_plain(bytes: &[u8]) -> serde_json::Value {
+    let text = lossy(bytes);
+    serde_json::from_str(&text).unwrap_or_else(|_| serde_json::Value::String(text))
+}
+
+fn pairs_plain(pairs: &[(String, Vec<u8>)]) -> serde_json::Value {
+    let mut seen = std::collections::BTreeSet::new();
+    let unique = pairs.iter().all(|(key, _)| seen.insert(key.as_str()));
+    if unique {
+        let mut map = serde_json::Map::new();
+        for (key, value) in pairs {
+            map.insert(key.clone(), serde_json::Value::String(lossy(value)));
+        }
+        return serde_json::Value::Object(map);
+    }
+    serde_json::Value::Array(
+        pairs
+            .iter()
+            .map(|(key, value)| serde_json::json!([key, lossy(value)]))
+            .collect(),
+    )
 }
 
 const SEED_FIELDS: &[&str] = &[
@@ -805,6 +874,43 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert!(error.contains("no JSON file in the seed format"), "{error}");
         assert!(error.contains("path must start with /"), "{error}");
+    }
+
+    #[test]
+    fn to_file_keeps_postcard_and_writes_a_plaintext_json_copy() {
+        let dir = std::env::temp_dir().join(format!("atropos-corpus-json-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let seed = HttpInput::batch_seed();
+        seed.to_file(dir.join("case")).unwrap();
+        assert_eq!(HttpInput::from_file(dir.join("case")).unwrap(), seed);
+
+        let text = std::fs::read_to_string(dir.join("case.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["method"], "POST");
+        assert_eq!(value["path"], "/wp-json/batch/v1");
+        assert_eq!(value["body"]["validation"], "normal");
+        assert_eq!(value["body"]["requests"][0]["path"], "/wp/v2/posts");
+        assert_eq!(value["body"]["requests"][0]["body"]["title"], "seed");
+        assert!(value["body_override"].is_null());
+
+        let mut smashed = seed;
+        smashed.body_override = Some(b"not json".to_vec());
+        smashed.headers = vec![
+            ("X-Test".to_string(), b"a".to_vec()),
+            ("X-Test".to_string(), b"b".to_vec()),
+        ];
+        smashed.to_file(dir.join("smashed")).unwrap();
+        let smashed_text = std::fs::read_to_string(dir.join("smashed.json")).unwrap();
+        let smashed_value: serde_json::Value = serde_json::from_str(&smashed_text).unwrap();
+        assert_eq!(smashed_value["body_override"], "not json");
+        assert_eq!(
+            smashed_value["headers"],
+            serde_json::json!([["X-Test", "a"], ["X-Test", "b"]])
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

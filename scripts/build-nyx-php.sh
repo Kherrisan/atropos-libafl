@@ -394,8 +394,8 @@ if [[ "${ATROPOS_NYX_SKIP_AGENT:-0}" != 1 ]]; then
 	AGENT_SOURCE="$BUILD_ROOT/agent-src"
 	mkdir -p "$AGENT_SOURCE"
 	cp -- "$REPO_ROOT/guest/atropos_agent.nim" "$REPO_ROOT/guest/atropos_request_shm.c" \
-		"$REPO_ROOT/guest/atropos_shared.h" "$LEGACY_ROOT/fuzzer/nyx.c" \
-		"$LEGACY_ROOT/fuzzer/nyx.h" "$AGENT_SOURCE/"
+		"$REPO_ROOT/guest/nyx_dump_file.c" "$REPO_ROOT/guest/atropos_shared.h" \
+		"$LEGACY_ROOT/fuzzer/nyx.c" "$LEGACY_ROOT/fuzzer/nyx.h" "$AGENT_SOURCE/"
 	python3 - "$AGENT_SOURCE/nyx.c" <<'PYTHON'
 from pathlib import Path
 import sys

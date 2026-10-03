@@ -1,0 +1,40 @@
+{
+  "method": "POST",
+  "path": "/wp-json/batch/v1",
+  "body": {
+    "validation": "normal",
+    "requests": [
+      {
+        "method": "POST",
+        "path": "http://"
+      },
+      {
+        "method": "POST",
+        "path": "http://user@:80"
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/pages",
+        "body": {
+          "title": "seed"
+        }
+      },
+      {
+        "method": "DELETE",
+        "path": "/wp/v2/users/1",
+        "body": {
+          "force": true,
+          "reassign": 1
+        }
+      }
+    ]
+  },
+  "pin_route": true
+}

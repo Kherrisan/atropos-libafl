@@ -1,0 +1,20 @@
+{
+  "method": "POST",
+  "path": "/wp-json/batch/v1",
+  "body": {
+    "validation": "normal",
+    "requests": [
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed",
+          "status": "publish",
+          "author": 1,
+          "sticky": true
+        }
+      }
+    ]
+  },
+  "pin_route": true
+}

@@ -1,0 +1,11 @@
+# AFL++ dictionary. Entries are name="value"; the name is ignored.
+# Extracted with rules/wordpress-batch-params.yml
+# Source: /home/user/wordpress/wp-includes/rest-api/endpoints/class-wp-rest-controller.php
+page="page"
+type="type"
+absint="absint"
+rest_validate_request_arg="rest_validate_request_arg"
+1="1"
+per_page="per_page"
+10="10"
+search="search"

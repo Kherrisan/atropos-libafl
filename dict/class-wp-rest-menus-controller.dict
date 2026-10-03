@@ -1,0 +1,11 @@
+# AFL++ dictionary. Entries are name="value"; the name is ignored.
+# Extracted with rules/wordpress-batch-params.yml
+# Source: /home/user/wordpress/wp-includes/rest-api/endpoints/class-wp-rest-menus-controller.php
+auto_add="auto_add"
+type="type"
+context="context"
+location="location"
+locations="locations"
+view="view"
+edit="edit"
+rest_invalid_menu_location="rest_invalid_menu_location"

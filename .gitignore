@@ -6,6 +6,7 @@
 /nyx-share/
 /nyx-corpus/
 /nyx-solutions/
+/output/
 core
 *.core
 /.env

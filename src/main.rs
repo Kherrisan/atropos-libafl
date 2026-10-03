@@ -1,19 +1,26 @@
+mod cli;
 mod coverage_report;
+mod exec_trace;
 mod input;
 mod llm;
 mod mutate;
 mod openapi;
+mod oracle;
 mod paths;
 mod stage;
 
-use std::{borrow::Cow, env, fs};
+use std::{borrow::Cow, env, fs, path::PathBuf};
 
-use input::NYX_INPUT_BUFFER_SIZE;
+use clap::Parser;
+
+use input::{HttpInput, NYX_INPUT_BUFFER_SIZE};
 use libafl::{
-    corpus::{Corpus, OnDiskCorpus},
+    corpus::{Corpus, OnDiskCorpus, Testcase},
     events::SimpleEventManager,
+    feedback_or,
     feedbacks::{CrashFeedback, MaxMapFeedback},
     fuzzer::{Evaluator, Fuzzer},
+    inputs::Input,
     monitors::SimpleMonitor,
     observers::StdMapObserver,
     schedulers::QueueScheduler,
@@ -23,20 +30,85 @@ use libafl::{
 use libafl_bolts::{rands::StdRand, tuples::tuple_list};
 use libafl_nyx::{executor::NyxExecutor, helper::NyxHelper, settings::NyxSettings};
 use llm::{LlmAgent, LlmConfig};
-use mutate::DeterministicMutator;
-use stage::DeterministicStage;
+use mutate::InputMutator;
+use stage::MutationStage;
 
-fn load_operations() -> Vec<openapi::Operation> {
-    let Some(path) = paths::openapi_path() else {
-        return Vec::new();
-    };
-    match openapi::load_operations(&path.to_string_lossy()) {
-        Ok(operations) => operations,
-        Err(err) => {
-            eprintln!("openapi: {err}");
-            Vec::new()
+fn load_operations(paths: &[std::path::PathBuf]) -> Result<Vec<openapi::Operation>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let operations = openapi::load_operation_files(paths)?;
+    if operations.is_empty() {
+        eprintln!(
+            "openapi: parsed {} file(s) but found no operations",
+            paths.len()
+        );
+    } else {
+        eprintln!(
+            "openapi: {} operation(s) from {} file(s)",
+            operations.len(),
+            paths.len()
+        );
+    }
+    Ok(operations)
+}
+
+fn drive<E, EM, I, S, ST, Z>(
+    fuzzer: &mut Z,
+    stages: &mut ST,
+    executor: &mut E,
+    state: &mut S,
+    manager: &mut EM,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    Z: Fuzzer<E, EM, I, S, ST>,
+{
+    match env::var("ATROPOS_NYX_ITERS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+    {
+        Some(iterations) => {
+            fuzzer.fuzz_loop_for(stages, executor, state, manager, iterations)?;
+        }
+        None => {
+            fuzzer.fuzz_loop(stages, executor, state, manager)?;
         }
     }
+    Ok(())
+}
+
+fn resume_disk_corpus<S>(state: &mut S, dir: &std::path::Path) -> Result<usize, String>
+where
+    S: HasCorpus<HttpInput>,
+{
+    let mut resumed = 0;
+    let entries =
+        fs::read_dir(dir).map_err(|err| format!("cannot read {}: {err}", dir.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("cannot read {}: {err}", dir.display()))?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name.ends_with(".json") || name.ends_with(".metadata") {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let input = HttpInput::from_file(entry.path())
+            .map_err(|err| format!("cannot load corpus input {}: {err}", entry.path().display()))?;
+        let mut testcase = Testcase::new(input);
+        *testcase.filename_mut() = Some(name.into_owned());
+        state
+            .corpus_mut()
+            .add(testcase)
+            .map_err(|err| format!("cannot resume corpus input: {err}"))?;
+        resumed += 1;
+    }
+    Ok(resumed)
 }
 
 fn corpus_has_inputs(dir: &std::path::Path) -> bool {
@@ -47,21 +119,22 @@ fn corpus_has_inputs(dir: &std::path::Path) -> bool {
         entry
             .file_name()
             .to_str()
-            .is_some_and(|name| !name.starts_with('.'))
+            .is_some_and(|name| !name.starts_with('.') && !name.ends_with(".json"))
             && entry.file_type().is_ok_and(|kind| kind.is_file())
     })
 }
 
 fn main() {
-    if let Err(error) = run() {
+    let args = cli::Args::parse();
+    if let Err(error) = run(args) {
         eprintln!("atropos-libafl: {error}");
         std::process::exit(1);
     }
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let share_dir = paths::nyx_share_dir();
-    let workdir = paths::nyx_workdir_dir();
+fn run(args: cli::Args) -> Result<(), Box<dyn std::error::Error>> {
+    let share_dir = args.nyx_share.clone();
+    let workdir = args.nyx_workdir.clone();
     if !share_dir.join("config.ron").is_file() {
         return Err(format!(
             "Nyx config is missing at {}; run scripts/prepare-nyx-share.sh after building the guest image",
@@ -94,10 +167,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     fs::create_dir_all(&workdir)?;
 
-    let output_dir = paths::output_dir();
-    let corpus_dir = output_dir.join("nyx-corpus");
+    let corpus_dir = args.corpus_dir.clone();
+    let objectives_dir = args.objectives_dir.clone();
     let corpus_ready = corpus_has_inputs(&corpus_dir);
-    let (startup_seeds, seed_tokens) = if let Some(dir) = paths::seed_dir() {
+    let (startup_seeds, seed_tokens) = if let Some(dir) = args.seed_dir() {
         let seeds = input::load_seed_directory(&dir)?;
         let tokens = input::dictionary_tokens(&seeds);
         eprintln!(
@@ -115,17 +188,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         (Vec::new(), Vec::new())
     } else {
         return Err(
-            "ATROPOS_SEED_DIR is unset. Set it to a directory containing one JSON seed per file."
+            "--seed-dir is required when the corpus directory is empty. Pass a directory containing one JSON seed per file."
                 .to_string()
                 .into(),
         );
     };
 
     let cpu_id = paths::nyx_cpu_id();
-    let timeout_secs = env::var("ATROPOS_NYX_TIMEOUT_SECS")
-        .ok()
-        .and_then(|value| value.parse::<u8>().ok())
-        .unwrap_or(2);
+    let timeout_secs = args.timeout_secs;
     let settings = NyxSettings::builder()
         .cpu_id(cpu_id)
         .parent_cpu_id(None)
@@ -143,18 +213,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         StdMapObserver::from_mut_ptr("nyx-pcov", helper.bitmap_buffer, helper.bitmap_size)
     };
 
-    let solution_dir = output_dir.join("nyx-solutions");
+    let dump_dir = workdir.join("dump");
     fs::create_dir_all(&corpus_dir)?;
-    fs::create_dir_all(&solution_dir)?;
+    fs::create_dir_all(&objectives_dir)?;
+    fs::create_dir_all(&dump_dir)?;
+    let php_cli_log = dump_dir.join(oracle::PHP_CLI_LOG_NAME);
+    let log_observer = oracle::PhpCliLogObserver::new(php_cli_log.clone());
 
     let mut feedback = MaxMapFeedback::new(&observer);
-    // Atropos reports PHP crashes and its application-level bug oracles through Nyx's
-    // extended-crash hypercall, which libafl_nyx maps to ExitKind::Crash.
-    let mut objective = CrashFeedback::new();
+    // Confirmed batch oracles arrive as ATROPOS_VULN_TRIGGERED lines in the PHP CLI log.
+    // PHP crashes and the older canary oracles still use Nyx's extended-crash hypercall.
+    let mut objective = feedback_or!(
+        oracle::OracleLogFeedback::new(php_cli_log),
+        CrashFeedback::new()
+    );
     let mut state = StdState::new(
         StdRand::new(),
-        OnDiskCorpus::new(corpus_dir)?,
-        OnDiskCorpus::new(solution_dir)?,
+        OnDiskCorpus::new(&corpus_dir)?,
+        OnDiskCorpus::new(&objectives_dir)?,
         &mut feedback,
         &mut objective,
     )?;
@@ -163,18 +239,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut manager = SimpleEventManager::new(monitor);
     let scheduler = QueueScheduler::new();
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
-    let mut executor = NyxExecutor::builder().build(helper, tuple_list!(observer));
+    let trace_observer = exec_trace::ExecTraceObserver::create()?;
+    let mut executor =
+        NyxExecutor::builder().build(helper, tuple_list!(trace_observer, observer, log_observer));
 
-    let operations = load_operations();
+    let operations = load_operations(&args.openapi_paths())?;
+    if startup_seeds.is_empty() && corpus_ready {
+        let resumed = resume_disk_corpus(&mut state, &corpus_dir)?;
+        eprintln!("corpus: resumed {resumed} on-disk input(s)");
+    }
     for seed in startup_seeds {
         fuzzer.add_input(&mut state, &mut executor, &mut manager, seed)?;
     }
 
-    let stage = DeterministicStage::new(
-        DeterministicMutator::new(operations, &seed_tokens)?,
-        LlmAgent::new(LlmConfig::from_env()),
+    let mutator = InputMutator::new(
+        operations.clone(),
+        &seed_tokens,
+        &args.dictionary_paths(),
+        &args.bug_trigger_paths(),
+    )?;
+    let mutation = MutationStage::new(
+        mutator,
+        LlmAgent::new(
+            LlmConfig::from_env(),
+            env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            workdir.clone(),
+            args.openapi_paths(),
+        ),
     );
-    let mut stages = tuple_list!(stage);
 
     eprintln!(
         "LibAFL Nyx ready: share={}, workdir={}, cpu={}, bitmap={} bytes",
@@ -184,23 +276,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         executor.helper.bitmap_size
     );
 
-    match env::var("ATROPOS_NYX_ITERS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-    {
-        Some(iterations) => {
-            fuzzer.fuzz_loop_for(
-                &mut stages,
-                &mut executor,
-                &mut state,
-                &mut manager,
-                iterations,
-            )?;
-        }
-        None => {
-            fuzzer.fuzz_loop(&mut stages, &mut executor, &mut state, &mut manager)?;
-        }
-    }
+    let mut stages = tuple_list!(mutation);
+    drive(
+        &mut fuzzer,
+        &mut stages,
+        &mut executor,
+        &mut state,
+        &mut manager,
+    )?;
 
     println!(
         "corpus={} solutions={}",

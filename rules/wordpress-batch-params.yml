@@ -1,0 +1,52 @@
+# Generic PHP request-parameter patterns. No function names: any PHP file
+# passed to scripts/build-batch-dictionary.py is scanned. Dynamic values such
+# as get_post_stati() are not literals, so they are not extracted.
+rules:
+  - id: php-request-enum
+    languages: [php]
+    severity: INFO
+    message: Schema array that declares an enum
+    pattern: array(..., 'enum' => $ENUM, ...)
+  - id: php-request-default
+    languages: [php]
+    severity: INFO
+    message: Schema array that declares a default
+    pattern: array(..., 'default' => $VALUE, ...)
+  - id: php-request-assign-key
+    languages: [php]
+    severity: INFO
+    message: Schema array assigned under a string key
+    pattern: $OBJ['$KEY'] = array(...)
+  - id: php-request-property-key
+    languages: [php]
+    severity: INFO
+    message: Schema property assigned under properties
+    pattern: $OBJ['properties']['$KEY'] = array(...)
+  - id: php-request-default-assign
+    languages: [php]
+    severity: INFO
+    message: Default assigned on an existing field
+    pattern: $OBJ['$KEY']['default'] = $VALUE
+  - id: php-request-enum-append
+    languages: [php]
+    severity: INFO
+    message: Enum value appended to an existing field
+    pattern: $OBJ['$KEY']['enum'][] = $VALUE
+  - id: php-request-pair-key
+    languages: [php]
+    severity: INFO
+    message: String key that opens a schema array
+    pattern-regex: (?m)^[ \t]*['"][A-Za-z0-9_-]+['"][ \t]*=>[ \t]*array[ \t]*\(
+  - id: php-request-query
+    languages: [php]
+    severity: INFO
+    message: Request query, body, or request parameter
+    pattern-either:
+      - pattern: $_GET['$KEY']
+      - pattern: $_POST['$KEY']
+      - pattern: $_REQUEST['$KEY']
+  - id: php-request-header-list
+    languages: [php]
+    severity: INFO
+    message: List of accepted request header names
+    pattern: array('Authorization', ...)

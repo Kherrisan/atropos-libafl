@@ -1,7 +1,7 @@
 use std::{
     fs,
     io::ErrorKind,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -60,14 +60,13 @@ struct QueueManifest<'a> {
 }
 
 impl QueueCoverageCollector {
-    pub fn new() -> Result<Self, String> {
-        let output_dir = crate::paths::output_dir();
+    pub fn new(output_dir: &Path, workdir: &Path) -> Result<Self, String> {
         let coverage_dir = output_dir.join("coverage");
         let llm_dir = output_dir.join("llm");
         fs::create_dir_all(&coverage_dir).map_err(|err| err.to_string())?;
         fs::create_dir_all(&llm_dir).map_err(|err| err.to_string())?;
 
-        let dump_dir = crate::paths::nyx_workdir_dir().join("dump");
+        let dump_dir = workdir.join("dump");
         let cpu_id = crate::paths::nyx_cpu_id();
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)

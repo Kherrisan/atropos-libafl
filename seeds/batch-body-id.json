@@ -1,0 +1,18 @@
+{
+  "method": "POST",
+  "path": "/wp-json/batch/v1",
+  "body": {
+    "validation": "normal",
+    "requests": [
+      {
+        "method": "PUT",
+        "path": "/wp/v2/posts/1",
+        "body": {
+          "id": 2,
+          "title": "seed"
+        }
+      }
+    ]
+  },
+  "pin_route": true
+}

@@ -1,0 +1,192 @@
+{
+  "method": "POST",
+  "path": "/wp-json/batch/v1",
+  "body": {
+    "validation": "normal",
+    "requests": [
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-0"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-1"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-2"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-3"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-4"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-5"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-6"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-7"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-8"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-9"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-10"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-11"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-12"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-13"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-14"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-15"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-16"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-17"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-18"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-19"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-20"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-21"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-22"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-23"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-24"
+        }
+      },
+      {
+        "method": "POST",
+        "path": "/wp/v2/posts",
+        "body": {
+          "title": "seed-25"
+        }
+      }
+    ]
+  },
+  "pin_route": true
+}

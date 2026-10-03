@@ -2,6 +2,7 @@ import osproc
 import std/[json, os, strformat, strutils]
 
 {.compile: "nyx.c".}
+{.compile: "nyx_dump_file.c".}
 {.compile: "atropos_request_shm.c".}
 
 proc nyx_init(): void {.importc.}
@@ -13,6 +14,7 @@ proc nyx_get_shm_id(): cint {.importc.}
 proc nyx_get_bitmap_size(): uint32 {.importc.}
 proc nyx_report_crash(message: cstring): void {.importc.}
 proc nyx_hprintf(message: cstring): void {.importc.}
+proc nyx_dump_file(name: cstring, data: pointer, len: uint32): void {.importc.}
 proc nyx_coverage_dump(buffer: cstring, length: uint32, cpu: uint32, kind: uint8): void {.importc.}
 
 proc atropos_request_channel_create(): cint {.importc.}
@@ -62,6 +64,35 @@ proc writeOracleCrc(): uint32 =
 proc guestLog(message: string) =
   if message.len > 0:
     nyx_hprintf(message.cstring)
+
+proc phpCliLogSize(): int =
+  const path = "/tmp/php-cli.log"
+  if not fileExists(path):
+    return 0
+  try:
+    int(getFileSize(path))
+  except CatchableError:
+    0
+
+proc publishPhpCliLog(startSize: int) =
+  const guestPath = "/tmp/php-cli.log"
+  const hostName = "php-cli.log"
+  const maxDump = 1024 * 1024
+  if not fileExists(guestPath):
+    nyx_dump_file(hostName, nil, 0)
+    return
+  var contents = readFile(guestPath)
+  if startSize > 0:
+    if startSize >= contents.len:
+      contents.setLen(0)
+    else:
+      contents = contents.substr(startSize)
+  if contents.len > maxDump:
+    contents = contents.substr(contents.len - maxDump)
+  if contents.len == 0:
+    nyx_dump_file(hostName, nil, 0)
+    return
+  nyx_dump_file(hostName, unsafeAddr contents[0], uint32(contents.len))
 
 proc startMariaDb(): bool =
   discard execCmd("chmod -R 777 /var/lib/php/sessions/")
@@ -213,8 +244,10 @@ proc main() =
   if detailedCoverage:
     discard execCmd("mkdir -p /tmp/atropos-php-coverage; rm -f /tmp/atropos-php-coverage/current.cobertura.xml /tmp/atropos-php-coverage/current.cov /tmp/atropos-php-coverage/error.log")
 
+  let phpLogStart = phpCliLogSize()
   if atropos_request_channel_publish(payloadText.cstring, uint32(payloadText.len), 1'u32) != 0:
     guestLog("Could not publish the request to PHP shared memory\n")
+    publishPhpCliLog(phpLogStart)
     nyx_exit()
     quit(0)
 
@@ -223,6 +256,7 @@ proc main() =
     guestLog(fmt"PHP request did not finish through shared memory (status {waitResult})\n")
     if fileExists("/tmp/php-cli.log"):
       guestLog(readFile("/tmp/php-cli.log"))
+    publishPhpCliLog(phpLogStart)
     nyx_exit()
     quit(0)
 
@@ -241,6 +275,7 @@ proc main() =
   if detailedCoverage:
     dumpCoverage(coverageCpu)
   reportCrashes(crashLog)
+  publishPhpCliLog(phpLogStart)
   nyx_exit()
 
 when isMainModule:

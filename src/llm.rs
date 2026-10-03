@@ -14,7 +14,7 @@ use serde::Deserialize;
 use crate::{
     coverage_report::{QueueCoverageCollector, QueueCoverageReport, QueueInputSummary},
     input::HttpInput,
-    mutate::DeterministicMutator,
+    mutate::InputMutator,
 };
 
 const MAX_REQUESTS_PER_SESSION: usize = 32;
@@ -93,13 +93,24 @@ impl LlmConfig {
 
 pub struct LlmAgent {
     config: LlmConfig,
+    output_dir: PathBuf,
+    nyx_workdir: PathBuf,
+    openapi_paths: Vec<PathBuf>,
     execs_since_novel: u64,
 }
 
 impl LlmAgent {
-    pub fn new(config: LlmConfig) -> Self {
+    pub fn new(
+        config: LlmConfig,
+        output_dir: PathBuf,
+        nyx_workdir: PathBuf,
+        openapi_paths: Vec<PathBuf>,
+    ) -> Self {
         Self {
             config,
+            output_dir,
+            nyx_workdir,
+            openapi_paths,
             execs_since_novel: 0,
         }
     }
@@ -128,7 +139,7 @@ impl LlmAgent {
         executor: &mut E,
         state: &mut S,
         manager: &mut EM,
-        havoc: &mut DeterministicMutator,
+        havoc: &mut InputMutator,
     ) -> Result<(), Error>
     where
         E: HasTimeout + SetTimeout,
@@ -167,7 +178,7 @@ impl LlmAgent {
             .iter()
             .map(|(id, input)| QueueInputSummary::new(id.0, input))
             .collect::<Vec<_>>();
-        let mut collector = match QueueCoverageCollector::new() {
+        let mut collector = match QueueCoverageCollector::new(&self.output_dir, &self.nyx_workdir) {
             Ok(collector) => collector,
             Err(err) => {
                 eprintln!("coverage scan could not start: {err}");
@@ -273,7 +284,7 @@ impl LlmAgent {
         report: &QueueCoverageReport,
         request_count: usize,
     ) -> Result<Vec<HttpInput>, String> {
-        let mut prompt = render_prompt(report, request_count);
+        let mut prompt = render_prompt(report, request_count, &self.openapi_label());
         if let Some(model) = &self.config.model {
             prompt = format!("使用模型 {model}。\n{prompt}");
         }
@@ -373,13 +384,22 @@ impl LlmAgent {
         }
         env_vars
     }
+
+    fn openapi_label(&self) -> String {
+        if self.openapi_paths.is_empty() {
+            "未配置".to_string()
+        } else {
+            self.openapi_paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
 }
 
-fn render_prompt(report: &QueueCoverageReport, request_count: usize) -> String {
+fn render_prompt(report: &QueueCoverageReport, request_count: usize, openapi: &str) -> String {
     let wordpress_root = crate::paths::wordpress_root();
-    let openapi = crate::paths::openapi_path()
-        .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "未配置".to_string());
     let scan_status = if report.failed_ids.is_empty()
         && report.collected_cases == report.total_cases
     {
@@ -506,7 +526,12 @@ mod tests {
     #[ignore]
     fn acp_ping() {
         let config = LlmConfig::from_env();
-        let agent = LlmAgent::new(config);
+        let agent = LlmAgent::new(
+            config,
+            PathBuf::from("/tmp"),
+            PathBuf::from("/tmp"),
+            Vec::new(),
+        );
         match agent.run_acp("Reply with exactly the single word pong. Do not use tools.") {
             Ok(text) => println!("ACP_PING {text}"),
             Err(err) => println!("ACP_PING_ERR {err}"),

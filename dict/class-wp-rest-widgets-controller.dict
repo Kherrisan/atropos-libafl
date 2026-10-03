@@ -1,0 +1,23 @@
+# AFL++ dictionary. Entries are name="value"; the name is ignored.
+# Extracted with rules/wordpress-batch-params.yml
+# Source: /home/user/wordpress/wp-includes/rest-api/endpoints/class-wp-rest-widgets-controller.php
+view="view"
+force="force"
+self="self"
+collection="collection"
+about="about"
+sidebar="sidebar"
+id="id"
+context="context"
+id_base="id_base"
+type="type"
+wp_inactive_widgets="wp_inactive_widgets"
+edit="edit"
+embed="embed"
+rendered="rendered"
+rendered_form="rendered_form"
+instance="instance"
+encoded="encoded"
+hash="hash"
+raw="raw"
+form_data="form_data"

@@ -1,0 +1,9 @@
+# AFL++ dictionary. Entries are name="value"; the name is ignored.
+# Extracted with rules/wordpress-batch-params.yml
+# Source: /home/user/wordpress/wp-includes/rest-api/endpoints/class-wp-rest-blocks-controller.php
+title="title"
+raw="raw"
+context="context"
+view="view"
+edit="edit"
+content="content"
