@@ -1,6 +1,5 @@
 mod cli;
 mod coverage_report;
-mod exec_trace;
 mod input;
 mod llm;
 mod mutate;
@@ -239,9 +238,7 @@ fn run(args: cli::Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut manager = SimpleEventManager::new(monitor);
     let scheduler = QueueScheduler::new();
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
-    let trace_observer = exec_trace::ExecTraceObserver::create()?;
-    let mut executor =
-        NyxExecutor::builder().build(helper, tuple_list!(trace_observer, observer, log_observer));
+    let mut executor = NyxExecutor::builder().build(helper, tuple_list!(observer, log_observer));
 
     let operations = load_operations(&args.openapi_paths())?;
     if startup_seeds.is_empty() && corpus_ready {

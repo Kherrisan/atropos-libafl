@@ -116,9 +116,10 @@ fi
 
 OUTPUT_DIR="$REPO_ROOT/output"
 mkdir -p "$OUTPUT_DIR"
+run_stamp="$(date +%Y%m%d-%H%M)"
 run_id=""
 for _ in 1 2 3 4 5 6 7 8 9 10; do
-	run_id="$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-' | cut -c1-4)"
+	run_id="${run_stamp}-$(uuidgen | tr '[:upper:]' '[:lower:]' | tr -d '-' | cut -c1-4)"
 	if [[ ! -e "$OUTPUT_DIR/$run_id" ]]; then
 		break
 	fi
@@ -131,10 +132,15 @@ fi
 
 RUN_DIR="$OUTPUT_DIR/$run_id"
 mkdir -p "$RUN_DIR"
+LOG_FILE="$RUN_DIR/fuzzer.log"
+touch "$LOG_FILE"
+# Keep the live terminal stream and store the same stdout/stderr in this run.
+exec > >(tee -a "$LOG_FILE") 2>&1
 printf 'fuzzer run directory: %s\n' "$RUN_DIR"
+printf 'fuzzer log: %s\n' "$LOG_FILE"
 cd "$RUN_DIR"
 # These cores were running at 2100 MHz. QEMU otherwise inherits 0-63 and can
 # stay on an 800 MHz core for a whole run.
 CPUSET="${ATROPOS_NYX_CPUSET:-2-5,7,9,12-14,16-20,22-28,32,35,37-39,41-48,51-60,63}"
 printf 'fuzzer cpu set: %s\n' "$CPUSET"
-exec taskset -c "$CPUSET" "$REPO_ROOT/target/nyx/atropos-libafl" "${args[@]}"
+taskset -c "$CPUSET" "$REPO_ROOT/target/nyx/atropos-libafl" "${args[@]}"

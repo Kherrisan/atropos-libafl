@@ -301,7 +301,7 @@ impl HttpInput {
     }
 
     /// Human-readable request. This is not a second corpus format.
-    pub(crate) fn plaintext_json(&self) -> serde_json::Value {
+    fn plaintext_json(&self) -> serde_json::Value {
         serde_json::json!({
             "method": self.method,
             "path": self.path,
