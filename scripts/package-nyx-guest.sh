@@ -28,12 +28,12 @@ for path in "$ARTIFACT_DIR/nyx-php-runtime.tar.gz" "$ARTIFACT_DIR/php-code-cover
 		exit 1
 	fi
 	done
-if [[ "$(cat "$ARTIFACT_DIR/atropos-agent-phpcov-runtime")" != nyx-agent-cli-shm-v2 ]]; then
-	printf 'The Nyx guest agent was built for the old FastCGI protocol; rerun scripts/build-nyx-php.sh.\n' >&2
+if [[ "$(cat "$ARTIFACT_DIR/atropos-agent-phpcov-runtime")" != nyx-agent-fastcgi-v1 ]]; then
+	printf 'The Nyx guest agent still uses the shared-memory request channel; rerun scripts/build-nyx-php.sh.\n' >&2
 	exit 1
 fi
-if [[ "$(cat "$ARTIFACT_DIR/php-code-coverage-runtime")" != php-code-coverage-9.2.31+phpcov-8.2.1+atropos-shm-v2 ]]; then
-	printf 'The PHP runtime was built for the old FastCGI protocol; rerun scripts/build-nyx-php.sh.\n' >&2
+if [[ "$(cat "$ARTIFACT_DIR/php-code-coverage-runtime")" != php-code-coverage-9.2.31+phpcov-8.2.1+fastcgi-v1 ]]; then
+	printf 'The PHP runtime still uses the shared-memory request channel; rerun scripts/build-nyx-php.sh.\n' >&2
 	exit 1
 fi
 if ! command -v mariadb-dump >/dev/null 2>&1; then

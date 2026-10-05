@@ -34,7 +34,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for dependency in autoconf make patch lddtree nim curl; do
+for dependency in autoconf make patch lddtree nim nimble curl git; do
 	if ! command -v "$dependency" >/dev/null 2>&1; then
 		printf 'Missing build command: %s\n' "$dependency" >&2
 		exit 1
@@ -369,7 +369,6 @@ date.timezone=UTC
 extension_dir=/tmp
 zend_extension=/tmp/opcache.so
 extension=pcov.so
-extension=atropos_shm.so
 pcov.enabled=1
 pcov.directory=/var/www/html
 memory_limit=512M
@@ -393,8 +392,18 @@ done
 if [[ "${ATROPOS_NYX_SKIP_AGENT:-0}" != 1 ]]; then
 	AGENT_SOURCE="$BUILD_ROOT/agent-src"
 	mkdir -p "$AGENT_SOURCE"
-	cp -- "$REPO_ROOT/guest/atropos_agent.nim" "$REPO_ROOT/guest/atropos_request_shm.c" \
-		"$REPO_ROOT/guest/nyx_dump_file.c" "$REPO_ROOT/guest/atropos_shared.h" \
+	NIMBLE_DIR="$BUILD_ROOT/nimble"
+	mkdir -p "$NIMBLE_DIR"
+	env NIMBLE_DIR="$NIMBLE_DIR" nimble install -y \
+		https://github.com/egueler/fastcgi.nim-patched.git
+	FASTCGI_CLIENT="$(find "$NIMBLE_DIR" -type f -path '*/fastcgi/client.nim' -print -quit)"
+	if [[ -z "$FASTCGI_CLIENT" ]]; then
+		printf 'nimble did not install fastcgi/client from the patched FastCGI package\n' >&2
+		exit 1
+	fi
+	FASTCGI_PATH="$(dirname -- "$(dirname -- "$FASTCGI_CLIENT")")"
+	cp -- "$REPO_ROOT/guest/atropos_agent.nim" \
+		"$REPO_ROOT/guest/nyx_dump_file.c" \
 		"$LEGACY_ROOT/fuzzer/nyx.c" "$LEGACY_ROOT/fuzzer/nyx.h" "$AGENT_SOURCE/"
 	python3 - "$AGENT_SOURCE/nyx.c" <<'PYTHON'
 from pathlib import Path
@@ -419,13 +428,14 @@ source = source.replace(
 )
 path.write_text(source.replace(anchor, anchor + "        done = true;\n"))
 PYTHON
-	(cd "$AGENT_SOURCE" && env -u LD_LIBRARY_PATH nim c \
+	(cd "$AGENT_SOURCE" && env -u LD_LIBRARY_PATH NIMBLE_DIR="$NIMBLE_DIR" nim c \
 		--passC:-B/usr/bin/ --passL:-B/usr/bin/ \
+		--path:"$FASTCGI_PATH" \
 		--nimcache:"$BUILD_ROOT/nimcache" \
 		--d:release --opt:speed \
 		--out:"$ARTIFACT_DIR/atropos_agent" \
 		atropos_agent.nim)
-	printf 'nyx-agent-cli-shm-v2\n' >"$ARTIFACT_DIR/atropos-agent-phpcov-runtime"
+	printf 'nyx-agent-fastcgi-v1\n' >"$ARTIFACT_DIR/atropos-agent-phpcov-runtime"
 	while IFS= read -r dependency; do
 		[[ -f "$dependency" ]] || continue
 		cp --remove-destination -L -- "$dependency" "$ARTIFACT_DIR/lib/$(basename -- "$dependency")"
@@ -477,9 +487,9 @@ for module in dom libxml xmlwriter; do
 done
 
 if ! env LD_LIBRARY_PATH="$ARTIFACT_DIR/lib" "$ARTIFACT_DIR/php-cli" \
-	-n -d "extension=$ARTIFACT_DIR/pcov.so" -d "extension=$ARTIFACT_DIR/atropos_shm.so" \
-	-r 'exit(function_exists("atropos_request_wait") && function_exists("pcov\\set_coverage_dump_enabled") && function_exists("pcov\\set_execution_limit") ? 0 : 1);'; then
-	printf 'PHP CLI must load the Atropos SHM bridge and Nyx PCOV toggle functions.\n' >&2
+	-n -d "extension=$ARTIFACT_DIR/pcov.so" \
+	-r 'exit(function_exists("pcov\\set_coverage_dump_enabled") && function_exists("pcov\\set_execution_limit") ? 0 : 1);'; then
+	printf 'PHP CLI must load the Nyx PCOV toggle functions.\n' >&2
 	exit 1
 fi
 
@@ -487,6 +497,6 @@ tar -C "$ARTIFACT_DIR" -czf "$ARTIFACT_DIR/nyx-php-runtime.tar.gz" \
 	target_executable php-cli php.ini pcov.so opcache.so atropos_shm.so lib php-code-coverage \
 	atropos-coverage-auto-prepend.php atropos-coverage-auto-append.php atropos-nyx-bootstrap.php \
 	atropos-flush-permalinks.php
-printf 'php-code-coverage-9.2.31+phpcov-8.2.1+atropos-shm-v2\n' >"$ARTIFACT_DIR/php-code-coverage-runtime"
+printf 'php-code-coverage-9.2.31+phpcov-8.2.1+fastcgi-v1\n' >"$ARTIFACT_DIR/php-code-coverage-runtime"
 printf 'Nyx PHP/PCOV runtime: %s\n' "$ARTIFACT_DIR"
 printf 'Host PHP prefix: %s\n' "$PHP_PREFIX"

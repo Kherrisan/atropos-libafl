@@ -921,6 +921,13 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_slice(&payload[..payload.len() - 1]).unwrap();
         assert!(parsed["requests"].is_array());
+        assert_eq!(
+            parsed["requests"][0]["SCRIPT_FILENAME"],
+            "/var/www/html/index.php"
+        );
+        let post_data = parsed["requests"][0]["POST_DATA"].as_str().unwrap();
+        assert!(post_data.contains("\"requests\""));
+        assert!(post_data.contains("seed"));
     }
 
     #[test]
