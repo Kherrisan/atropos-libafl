@@ -1,0 +1,10 @@
+--- a/src/main/java/init/RequestFilter.java
++++ b/src/main/java/init/RequestFilter.java
+@@ -27,6 +27,7 @@
+             }
+             @Override
+             public void doFilter(ServletRequest servletRequest, ServletResponse servletResponse, FilterChain filterChain) throws IOException, ServletException {
++                Prepare.start = new java.io.File("/tmp/spring_fuzz_enabled").isFile();
+                 HttpServletRequest httpServletRequest = (HttpServletRequest) servletRequest;
+ 
+                 Map<String, String> customHeaders = new HashMap<>();

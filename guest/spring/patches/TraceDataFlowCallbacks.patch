@@ -1,0 +1,11 @@
+--- a/src/main/java/runtime/TraceDataFlowCallbacks.java
++++ b/src/main/java/runtime/TraceDataFlowCallbacks.java
+@@ -127,7 +127,7 @@ public class TraceDataFlowCallbacks {
+                 }
+             }
+             request.setAttribute("runtimeInfo", map);
+-        } catch (Exception e) {
++        } catch (Throwable e) {
+             //e.printStackTrace();
+         }
+         /*if (Objects.equals(entry.getKey(), edgeId)) {

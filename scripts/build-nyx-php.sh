@@ -262,8 +262,8 @@ make install
 
 ATROPOS_EXT_SOURCE="$BUILD_ROOT/atropos-shm-ext"
 mkdir -p "$ATROPOS_EXT_SOURCE"
-cp -- "$REPO_ROOT/guest/php-ext/config.m4" "$REPO_ROOT/guest/php-ext/atropos_shm.c" \
-	"$REPO_ROOT/guest/atropos_shared.h" "$ATROPOS_EXT_SOURCE/"
+cp -- "$REPO_ROOT/guest/php/ext/config.m4" "$REPO_ROOT/guest/php/ext/atropos_shm.c" \
+	"$REPO_ROOT/guest/php/atropos_shared.h" "$ATROPOS_EXT_SOURCE/"
 cd "$ATROPOS_EXT_SOURCE"
 phpize
 ./configure --with-php-config="$PHP_PREFIX/bin/php-config"
@@ -309,8 +309,8 @@ COMPOSER_MEMORY_LIMIT=-1 \
 		--prefer-dist --no-interaction --classmap-authoritative
 cp -- "$COVERAGE_TOOLS_DIR/auto-prepend.php" "$ARTIFACT_DIR/atropos-coverage-auto-prepend.php"
 cp -- "$COVERAGE_TOOLS_DIR/auto-append.php" "$ARTIFACT_DIR/atropos-coverage-auto-append.php"
-cp -- "$REPO_ROOT/guest/atropos-nyx-bootstrap.php" "$ARTIFACT_DIR/atropos-nyx-bootstrap.php"
-cp -- "$REPO_ROOT/guest/atropos-flush-permalinks.php" "$ARTIFACT_DIR/atropos-flush-permalinks.php"
+cp -- "$REPO_ROOT/guest/php/atropos-nyx-bootstrap.php" "$ARTIFACT_DIR/atropos-nyx-bootstrap.php"
+cp -- "$REPO_ROOT/guest/php/atropos-flush-permalinks.php" "$ARTIFACT_DIR/atropos-flush-permalinks.php"
 
 export CC="${ATROPOS_NYX_NIM_CC:-/usr/bin/gcc}"
 export CXX="${ATROPOS_NYX_NIM_CXX:-/usr/bin/g++}"
@@ -402,8 +402,8 @@ if [[ "${ATROPOS_NYX_SKIP_AGENT:-0}" != 1 ]]; then
 		exit 1
 	fi
 	FASTCGI_PATH="$(dirname -- "$(dirname -- "$FASTCGI_CLIENT")")"
-	cp -- "$REPO_ROOT/guest/atropos_agent.nim" \
-		"$REPO_ROOT/guest/nyx_dump_file.c" \
+	cp -- "$REPO_ROOT/guest/php/atropos_agent.nim" \
+		"$REPO_ROOT/guest/common/nyx_dump_file.c" \
 		"$LEGACY_ROOT/fuzzer/nyx.c" "$LEGACY_ROOT/fuzzer/nyx.h" "$AGENT_SOURCE/"
 	python3 - "$AGENT_SOURCE/nyx.c" <<'PYTHON'
 from pathlib import Path

@@ -122,7 +122,7 @@ impl Operation {
             .as_ref()
             .map(example_json)
             .unwrap_or(JsonValue::Object(Vec::new()));
-        HttpInput {
+        HttpInput::from_request(crate::input::HttpRequest {
             method: self.method.clone(),
             path: self.path_template.clone(),
             query: Vec::new(),
@@ -132,10 +132,7 @@ impl Operation {
             body_override: None,
             operation_key: Some(self.key.clone()),
             pin_route: true,
-            exec_limit: 0,
-            redqueen: false,
-            coverage_dump: false,
-        }
+        })
     }
 }
 
@@ -165,7 +162,7 @@ pub fn load_operation_files(paths: &[impl AsRef<Path>]) -> Result<Vec<Operation>
 }
 
 pub fn match_operation<'a>(
-    input: &HttpInput,
+    input: &crate::input::HttpRequest,
     operations: &'a [Operation],
 ) -> Option<&'a Operation> {
     if let Some(key) = &input.operation_key {
@@ -1074,12 +1071,12 @@ paths:
         std::fs::remove_file(path).unwrap();
         assert_eq!(ops.len(), 1);
         let input = ops[0].to_input();
-        let body = String::from_utf8(input.body_bytes()).unwrap();
+        let body = String::from_utf8(input.requests[0].body_bytes()).unwrap();
         assert!(body.contains("requests"));
         assert!(body.contains("title"));
         assert!(body.contains("method"));
-        assert_eq!(input.method, "POST");
-        assert_eq!(input.path, "/wp-json/batch/v1");
+        assert_eq!(input.requests[0].method, "POST");
+        assert_eq!(input.requests[0].path, "/wp-json/batch/v1");
     }
 
     #[test]
@@ -1162,14 +1159,9 @@ components:
         assert_eq!(ops[0].parameters.len(), 1);
         assert_eq!(ops[0].parameters[0].name, "limit");
         assert_eq!(ops[0].parameters[0].location, ParameterLocation::Query);
-        assert!(match_operation(
-            &HttpInput {
-                path: "/items/9".to_string(),
-                ..ops[0].to_input()
-            },
-            &ops
-        )
-        .is_some());
+        let mut input = ops[0].to_input();
+        input.requests[0].path = "/items/9".to_string();
+        assert!(match_operation(&input.requests[0], &ops).is_some());
     }
 
     #[test]

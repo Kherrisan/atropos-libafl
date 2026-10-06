@@ -10,7 +10,7 @@ use libafl::{
 use libafl_bolts::{rands::Rand, Named};
 
 use crate::{
-    input::{HttpInput, JsonValue, NYX_INPUT_BUFFER_SIZE},
+    input::{HttpInput, HttpRequest, JsonValue, NYX_INPUT_BUFFER_SIZE},
     openapi::{Operation, Schema},
 };
 
@@ -108,15 +108,38 @@ impl InputMutator {
         S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
     {
         let has_donor = has_crossover_donor(state)?;
-        let sites = mutation_sites(input, has_donor);
         let mut candidates = Vec::new();
-        if !sites.is_empty() {
-            let budget = mutation_budget(sites.len());
-            for _ in 0..budget {
-                let mut candidate = input.clone();
-                let site = sites[state.rand_mut().below_or_zero(sites.len())].clone();
-                let changed = self.mutate_site(state, &mut candidate, &site)?;
-                if changed
+        if let Some(index) = choose_request_index(state, input) {
+            let sites = mutation_sites(&input.requests[index], has_donor);
+            if !sites.is_empty() {
+                let budget = mutation_budget(sites.len());
+                for _ in 0..budget {
+                    let mut candidate = input.clone();
+                    let site = sites[state.rand_mut().below_or_zero(sites.len())].clone();
+                    let changed = self.mutate_request(state, &mut candidate, index, &site)?;
+                    if changed
+                        && candidate != *input
+                        && candidate.target_bytes().len() <= NYX_INPUT_BUFFER_SIZE
+                    {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+        for _ in 0..3 {
+            let mut candidate = input.clone();
+            if mutate_request_list(state, &mut candidate)?
+                && candidate != *input
+                && candidate.target_bytes().len() <= NYX_INPUT_BUFFER_SIZE
+            {
+                candidates.push(candidate);
+            }
+        }
+
+        if state.rand_mut().coinflip(self.violation_rate) {
+            let mut candidate = input.clone();
+            if let Some(index) = choose_request_index(state, &candidate) {
+                if inject_malformed_body(&mut candidate.requests[index])
                     && candidate != *input
                     && candidate.target_bytes().len() <= NYX_INPUT_BUFFER_SIZE
                 {
@@ -125,32 +148,26 @@ impl InputMutator {
             }
         }
 
-        if state.rand_mut().coinflip(self.violation_rate) {
-            let mut candidate = input.clone();
-            if inject_malformed_body(&mut candidate)
-                && candidate != *input
-                && candidate.target_bytes().len() <= NYX_INPUT_BUFFER_SIZE
-            {
-                candidates.push(candidate);
-            }
-        }
-
         Ok(candidates)
     }
 
-    fn mutate_site<S>(
+    fn mutate_request<S>(
         &mut self,
         state: &mut S,
         input: &mut HttpInput,
+        index: usize,
         site: &Site,
     ) -> Result<bool, Error>
     where
         S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
     {
-        let operation = crate::openapi::match_operation(input, &self.operations);
+        let Some(request) = input.requests.get_mut(index) else {
+            return Ok(false);
+        };
+        let operation = crate::openapi::match_operation(request, &self.operations);
         mutate_site(
             state,
-            input,
+            request,
             site,
             operation,
             &self.dictionary,
@@ -171,6 +188,9 @@ where
     S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
 {
     fn mutate(&mut self, state: &mut S, input: &mut HttpInput) -> Result<MutationResult, Error> {
+        if state.rand_mut().below_or_zero(8) == 0 {
+            return apply_request_list(state, input);
+        }
         if state.rand_mut().coinflip(self.violation_rate) {
             return apply_with_size_limit(
                 state,
@@ -182,13 +202,16 @@ where
             );
         }
         let has_donor = has_crossover_donor(state)?;
-        let sites = mutation_sites(input, has_donor);
+        let Some(index) = choose_request_index(state, input) else {
+            return Ok(MutationResult::Skipped);
+        };
+        let sites = mutation_sites(&input.requests[index], has_donor);
         if sites.is_empty() {
             return Ok(MutationResult::Skipped);
         }
         let site = sites[state.rand_mut().below_or_zero(sites.len())].clone();
         let mut candidate = input.clone();
-        let changed = self.mutate_site(state, &mut candidate, &site)?;
+        let changed = self.mutate_request(state, &mut candidate, index, &site)?;
         if !changed || candidate == *input || candidate.target_bytes().len() > NYX_INPUT_BUFFER_SIZE
         {
             return Ok(MutationResult::Skipped);
@@ -293,7 +316,81 @@ pub(crate) fn mutation_budget(site_count: usize) -> usize {
     site_count.saturating_mul(2).clamp(BUDGET_MIN, BUDGET_MAX)
 }
 
-fn mutation_sites(input: &HttpInput, has_donor: bool) -> Vec<Site> {
+fn choose_request_index<S: HasRand>(state: &mut S, input: &HttpInput) -> Option<usize> {
+    if input.requests.is_empty() {
+        return None;
+    }
+    Some(state.rand_mut().below_or_zero(input.requests.len()))
+}
+
+fn mutate_request_list<S>(state: &mut S, input: &mut HttpInput) -> Result<bool, Error>
+where
+    S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
+{
+    if input.requests.is_empty() {
+        return Ok(false);
+    }
+    match state.rand_mut().below_or_zero(3) {
+        0 => {
+            let index = state.rand_mut().below_or_zero(input.requests.len());
+            let copy = input.requests[index].clone();
+            input.requests.insert(index + 1, copy);
+            Ok(true)
+        }
+        1 => {
+            if input.requests.len() < 2 {
+                return Ok(false);
+            }
+            let index = state.rand_mut().below_or_zero(input.requests.len());
+            input.requests.remove(index);
+            Ok(true)
+        }
+        _ => append_donor_request(state, input),
+    }
+}
+
+fn append_donor_request<S>(state: &mut S, input: &mut HttpInput) -> Result<bool, Error>
+where
+    S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
+{
+    let Some(current_id) = state.current_corpus_id()? else {
+        return Ok(false);
+    };
+    let donor_ids = state
+        .corpus()
+        .ids()
+        .filter(|id| *id != current_id)
+        .collect::<Vec<_>>();
+    if donor_ids.is_empty() {
+        return Ok(false);
+    }
+    let donor_id = donor_ids[state.rand_mut().below_or_zero(donor_ids.len())];
+    let donor = state.corpus().cloned_input_for_id(donor_id)?;
+    if donor.requests.is_empty() {
+        return Ok(false);
+    }
+    let request = donor.requests[state.rand_mut().below_or_zero(donor.requests.len())].clone();
+    input.requests.push(request);
+    Ok(true)
+}
+
+fn apply_request_list<S>(state: &mut S, input: &mut HttpInput) -> Result<MutationResult, Error>
+where
+    S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
+{
+    let mut candidate = input.clone();
+    if !mutate_request_list(state, &mut candidate)?
+        || candidate == *input
+        || candidate.requests.is_empty()
+        || candidate.target_bytes().len() > NYX_INPUT_BUFFER_SIZE
+    {
+        return Ok(MutationResult::Skipped);
+    }
+    *input = candidate;
+    Ok(MutationResult::Mutated)
+}
+
+fn mutation_sites(input: &HttpRequest, has_donor: bool) -> Vec<Site> {
     let mut sites = Vec::new();
     for path in input.body.value_paths() {
         if matches!(
@@ -335,7 +432,7 @@ where
 
 fn mutate_site<S>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     site: &Site,
     operation: Option<&Operation>,
     dictionary: &[String],
@@ -404,7 +501,7 @@ fn body_schema<'a>(
 
 fn mutate_scalar<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     path: &[usize],
     operation: Option<&Operation>,
     dictionary: &[String],
@@ -447,7 +544,7 @@ fn mutate_scalar<S: HasRand>(
 
 fn mutate_scalar_compliant<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     path: &[usize],
     schema: &Schema,
     dictionary: &[String],
@@ -568,7 +665,7 @@ fn bounded_string<S: HasRand>(
 
 fn replace_json_kind<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     path: &[usize],
     dictionary: &[String],
 ) -> bool {
@@ -587,7 +684,7 @@ fn replace_json_kind<S: HasRand>(
 
 fn mutate_object<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     path: &[usize],
     operation: Option<&Operation>,
     dictionary: &[String],
@@ -625,7 +722,7 @@ enum ObjectOp {
 
 fn mutate_object_compliant<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     path: &[usize],
     schema: &Schema,
 ) -> bool {
@@ -689,7 +786,7 @@ fn mutate_object_compliant<S: HasRand>(
 
 fn insert_key_at<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     path: &[usize],
     dictionary: &[String],
     key_candidates: &[String],
@@ -709,7 +806,7 @@ fn insert_key_at<S: HasRand>(
     true
 }
 
-fn remove_key_at<S: HasRand>(state: &mut S, input: &mut HttpInput, path: &[usize]) -> bool {
+fn remove_key_at<S: HasRand>(state: &mut S, input: &mut HttpRequest, path: &[usize]) -> bool {
     let Some(fields) = input.body.object_fields_mut(path) else {
         return false;
     };
@@ -723,7 +820,7 @@ fn remove_key_at<S: HasRand>(state: &mut S, input: &mut HttpInput, path: &[usize
 
 fn rename_key_at<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     path: &[usize],
     key_candidates: &[String],
 ) -> bool {
@@ -752,7 +849,7 @@ fn rename_key_at<S: HasRand>(
 
 fn nest_new_at<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     path: &[usize],
     key_candidates: &[String],
 ) -> bool {
@@ -772,7 +869,7 @@ fn nest_new_at<S: HasRand>(
     true
 }
 
-fn nest_existing_at<S: HasRand>(state: &mut S, input: &mut HttpInput, path: &[usize]) -> bool {
+fn nest_existing_at<S: HasRand>(state: &mut S, input: &mut HttpRequest, path: &[usize]) -> bool {
     let Some(JsonValue::Object(fields)) = input.body.leaf_ref(path) else {
         return false;
     };
@@ -794,7 +891,7 @@ fn nest_existing_at<S: HasRand>(state: &mut S, input: &mut HttpInput, path: &[us
 
 fn mutate_array_at<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     path: &[usize],
     operation: Option<&Operation>,
     dictionary: &[String],
@@ -808,7 +905,7 @@ fn mutate_array_at<S: HasRand>(
 
 fn mutate_array_compliant<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     path: &[usize],
     schema: &Schema,
 ) -> bool {
@@ -875,7 +972,7 @@ fn mutate_array_compliant<S: HasRand>(
 
 fn mutate_metadata<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     location: crate::openapi::ParameterLocation,
     operation: Option<&Operation>,
     dictionary: &[String],
@@ -899,7 +996,7 @@ fn mutate_metadata<S: HasRand>(
 }
 
 fn pair_list_mut(
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     location: crate::openapi::ParameterLocation,
 ) -> &mut Vec<(String, Vec<u8>)> {
     match location {
@@ -1012,7 +1109,7 @@ fn parameter_bytes(value: &JsonValue) -> Vec<u8> {
     }
 }
 
-fn applicable_operations<S>(state: &S, input: &HttpInput) -> Result<Vec<MutationOp>, Error>
+fn applicable_operations<S>(state: &S, input: &HttpRequest) -> Result<Vec<MutationOp>, Error>
 where
     S: HasCorpus<HttpInput> + HasCurrentCorpusId,
 {
@@ -1086,18 +1183,21 @@ fn apply_with_size_limit<S>(
 where
     S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
 {
+    let Some(index) = choose_request_index(state, input) else {
+        return Ok(MutationResult::Skipped);
+    };
     let mut candidate = input.clone();
     let changed = if let Some(operation) = operation {
         apply_operation(
             state,
-            &mut candidate,
+            &mut candidate.requests[index],
             operation,
             openapi_operations,
             dictionary,
             key_candidates,
         )?
     } else {
-        inject_malformed_body(&mut candidate)
+        inject_malformed_body(&mut candidate.requests[index])
     };
     if !changed || candidate == *input || candidate.target_bytes().len() > NYX_INPUT_BUFFER_SIZE {
         return Ok(MutationResult::Skipped);
@@ -1108,7 +1208,7 @@ where
 
 fn apply_operation<S>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     operation: MutationOp,
     openapi_operations: &[Operation],
     dictionary: &[String],
@@ -1140,7 +1240,7 @@ where
 
 fn mutate_body_string<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     operations: &[Operation],
     dictionary: &[String],
 ) -> bool {
@@ -1266,7 +1366,7 @@ fn splice_or_replace<S: HasRand>(state: &mut S, bytes: &mut Vec<u8>, tokens: &[S
     true
 }
 
-fn mutate_body_number<S: HasRand>(state: &mut S, input: &mut HttpInput) -> bool {
+fn mutate_body_number<S: HasRand>(state: &mut S, input: &mut HttpRequest) -> bool {
     let paths = input
         .body
         .value_paths()
@@ -1332,7 +1432,7 @@ pub(crate) fn mutate_number_value<S: HasRand>(state: &mut S, text: &mut String) 
     }
 }
 
-fn mutate_bool_value<S: HasRand>(state: &mut S, input: &mut HttpInput) -> bool {
+fn mutate_bool_value<S: HasRand>(state: &mut S, input: &mut HttpRequest) -> bool {
     let paths = input.body.value_paths();
     let bool_paths = paths
         .into_iter()
@@ -1351,7 +1451,7 @@ fn mutate_bool_value<S: HasRand>(state: &mut S, input: &mut HttpInput) -> bool {
 
 fn mutate_null_or_type<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     dictionary: &[String],
 ) -> bool {
     let paths = input.body.value_paths();
@@ -1456,7 +1556,7 @@ pub(crate) fn random_string_bytes<S: HasRand>(state: &mut S, dictionary: &[Strin
 
 fn insert_object_key<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     dictionary: &[String],
     key_candidates: &[String],
 ) -> bool {
@@ -1479,7 +1579,7 @@ fn insert_object_key<S: HasRand>(
     true
 }
 
-fn remove_object_key<S: HasRand>(state: &mut S, input: &mut HttpInput) -> bool {
+fn remove_object_key<S: HasRand>(state: &mut S, input: &mut HttpRequest) -> bool {
     let paths = input
         .body
         .object_paths()
@@ -1503,7 +1603,7 @@ fn remove_object_key<S: HasRand>(state: &mut S, input: &mut HttpInput) -> bool {
 
 fn rename_object_key<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     key_candidates: &[String],
 ) -> bool {
     let paths = input
@@ -1552,7 +1652,7 @@ fn candidate_key<S: HasRand>(state: &mut S, candidates: &[String]) -> String {
     }
 }
 
-fn mutate_array<S: HasRand>(state: &mut S, input: &mut HttpInput, dictionary: &[String]) -> bool {
+fn mutate_array<S: HasRand>(state: &mut S, input: &mut HttpRequest, dictionary: &[String]) -> bool {
     let paths = input.body.array_paths();
     let Some(path) = choose_path(state, &paths) else {
         return false;
@@ -1562,7 +1662,7 @@ fn mutate_array<S: HasRand>(state: &mut S, input: &mut HttpInput, dictionary: &[
 
 fn mutate_array_free<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     path: &[usize],
     dictionary: &[String],
 ) -> bool {
@@ -1682,7 +1782,7 @@ fn mutate_array_free<S: HasRand>(
 
 fn nest_object_as_new_field<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     key_candidates: &[String],
 ) -> bool {
     let paths = input.body.object_paths();
@@ -1708,7 +1808,7 @@ fn nest_object_as_new_field<S: HasRand>(
     true
 }
 
-fn nest_object_into_existing_field<S: HasRand>(state: &mut S, input: &mut HttpInput) -> bool {
+fn nest_object_into_existing_field<S: HasRand>(state: &mut S, input: &mut HttpRequest) -> bool {
     let paths = input
         .body
         .object_paths()
@@ -1747,7 +1847,7 @@ fn nest_object_into_existing_field<S: HasRand>(state: &mut S, input: &mut HttpIn
 
 fn mutate_http_metadata<S: HasRand>(
     state: &mut S,
-    input: &mut HttpInput,
+    input: &mut HttpRequest,
     dictionary: &[String],
 ) -> bool {
     match state.rand_mut().below_or_zero(3) {
@@ -1807,7 +1907,7 @@ fn mutate_pair_list<S: HasRand>(
     true
 }
 
-fn crossover_body_subtree<S>(state: &mut S, input: &mut HttpInput) -> Result<bool, Error>
+fn crossover_body_subtree<S>(state: &mut S, input: &mut HttpRequest) -> Result<bool, Error>
 where
     S: HasRand + HasCorpus<HttpInput> + HasCurrentCorpusId,
 {
@@ -1824,7 +1924,11 @@ where
     }
     let donor_id = donor_ids[state.rand_mut().below_or_zero(donor_ids.len())];
     let donor = state.corpus().cloned_input_for_id(donor_id)?;
-    let source_paths = donor.body.value_paths();
+    if donor.requests.is_empty() {
+        return Ok(false);
+    }
+    let donor_request = &donor.requests[state.rand_mut().below_or_zero(donor.requests.len())];
+    let source_paths = donor_request.body.value_paths();
     let target_paths = input.body.value_paths();
     let Some(source_path) = choose_path(state, &source_paths) else {
         return Ok(false);
@@ -1832,7 +1936,7 @@ where
     let Some(target_path) = choose_path(state, &target_paths) else {
         return Ok(false);
     };
-    let Some(replacement) = donor.body.leaf_ref(&source_path).cloned() else {
+    let Some(replacement) = donor_request.body.leaf_ref(&source_path).cloned() else {
         return Ok(false);
     };
     let Some(target) = input.body.leaf_mut(&target_path) else {
@@ -1846,7 +1950,7 @@ where
     Ok(true)
 }
 
-fn inject_malformed_body(input: &mut HttpInput) -> bool {
+fn inject_malformed_body(input: &mut HttpRequest) -> bool {
     let mut raw = input.body_bytes();
     raw.push(b'{');
     raw.extend_from_slice(b"\xff");
@@ -2035,7 +2139,7 @@ mod tests {
 
     fn input_with_body(body: JsonValue) -> HttpInput {
         let mut input = HttpInput::batch_seed();
-        input.body = body;
+        input.requests[0].body = body;
         input
     }
 
@@ -2102,10 +2206,10 @@ mod tests {
         assert!(serde_json::from_str::<serde_json::Number>(&number).is_ok());
 
         let mut input = input_with_body(JsonValue::Bool(true));
-        input.body_override = Some(b"old".to_vec());
-        assert!(mutate_bool_value(&mut state, &mut input));
-        assert_eq!(input.body, JsonValue::Bool(false));
-        assert!(input.body_override.is_none());
+        input.requests[0].body_override = Some(b"old".to_vec());
+        assert!(mutate_bool_value(&mut state, &mut input.requests[0]));
+        assert_eq!(input.requests[0].body, JsonValue::Bool(false));
+        assert!(input.requests[0].body_override.is_none());
     }
 
     #[test]
@@ -2153,12 +2257,12 @@ mod tests {
     fn null_type_mutation_clears_body_override_and_keeps_json_serializable() {
         let mut state = TestState::new(15);
         let mut input = input_with_body(JsonValue::Null);
-        input.body_override = Some(b"stale".to_vec());
+        input.requests[0].body_override = Some(b"stale".to_vec());
 
-        assert!(mutate_null_or_type(&mut state, &mut input, &[]));
-        assert_ne!(input.body, JsonValue::Null);
-        assert!(input.body_override.is_none());
-        let encoded = input.body_bytes();
+        assert!(mutate_null_or_type(&mut state, &mut input.requests[0], &[]));
+        assert_ne!(input.requests[0].body, JsonValue::Null);
+        assert!(input.requests[0].body_override.is_none());
+        let encoded = input.requests[0].body_bytes();
         assert!(serde_json::from_slice::<serde_json::Value>(&encoded).is_ok());
     }
 
@@ -2172,21 +2276,21 @@ mod tests {
 
         assert!(insert_object_key(
             &mut state,
-            &mut input,
+            &mut input.requests[0],
             &[],
             &["added".to_string()]
         ));
         assert!(matches!(
-            input.body.leaf_ref(&[]),
+            input.requests[0].body.leaf_ref(&[]),
             Some(JsonValue::Object(fields)) if fields.iter().any(|(key, _)| key == "added")
         ));
-        let before_remove = match &input.body {
+        let before_remove = match &input.requests[0].body {
             JsonValue::Object(fields) => fields.len(),
             _ => unreachable!(),
         };
-        assert!(remove_object_key(&mut state, &mut input));
+        assert!(remove_object_key(&mut state, &mut input.requests[0]));
         assert!(matches!(
-            input.body.leaf_ref(&[]),
+            input.requests[0].body.leaf_ref(&[]),
             Some(JsonValue::Object(fields)) if fields.len() + 1 == before_remove
         ));
 
@@ -2196,11 +2300,11 @@ mod tests {
         )]));
         assert!(rename_object_key(
             &mut state,
-            &mut rename,
+            &mut rename.requests[0],
             &["renamed".to_string()]
         ));
         assert!(matches!(
-            rename.body.leaf_ref(&[]),
+            rename.requests[0].body.leaf_ref(&[]),
             Some(JsonValue::Object(fields)) if fields[0].0 == "renamed"
         ));
 
@@ -2208,20 +2312,23 @@ mod tests {
         let mut nested = input_with_body(original.clone());
         assert!(nest_object_as_new_field(
             &mut state,
-            &mut nested,
+            &mut nested.requests[0],
             &["copy".to_string()]
         ));
         assert!(matches!(
-            nested.body.leaf_ref(&[]),
+            nested.requests[0].body.leaf_ref(&[]),
             Some(JsonValue::Object(fields)) if fields.iter().any(|(key, value)| key == "copy" && value == &original)
         ));
 
         let mut nested_existing = input_with_body(original.clone());
         assert!(nest_object_into_existing_field(
             &mut state,
-            &mut nested_existing
+            &mut nested_existing.requests[0]
         ));
-        assert_eq!(nested_existing.body.leaf_ref(&[0]), Some(&original));
+        assert_eq!(
+            nested_existing.requests[0].body.leaf_ref(&[0]),
+            Some(&original)
+        );
     }
 
     #[test]
@@ -2236,7 +2343,9 @@ mod tests {
         let mut changed = false;
         for _ in 0..32 {
             let mut candidate = input.clone();
-            if mutate_array(&mut state, &mut candidate, &[]) && candidate.body != original {
+            if mutate_array(&mut state, &mut candidate.requests[0], &[])
+                && candidate.requests[0].body != original
+            {
                 changed = true;
                 break;
             }
@@ -2250,11 +2359,13 @@ mod tests {
         let mut input = input_with_body(JsonValue::Null);
         assert!(mutate_http_metadata(
             &mut state,
-            &mut input,
+            &mut input.requests[0],
             &["token".to_string()]
         ));
         assert_eq!(
-            input.query.len() + input.headers.len() + input.cookies.len(),
+            input.requests[0].query.len()
+                + input.requests[0].headers.len()
+                + input.requests[0].cookies.len(),
             1
         );
     }
@@ -2272,8 +2383,8 @@ mod tests {
         state.current_id = Some(current_id);
 
         let mut child = current.clone();
-        assert!(crossover_body_subtree(&mut state, &mut child).unwrap());
-        assert_ne!(child.body, current.body);
+        assert!(crossover_body_subtree(&mut state, &mut child.requests[0]).unwrap());
+        assert_ne!(child.requests[0].body, current.requests[0].body);
         assert_eq!(state.corpus.cloned_input_for_id(donor_id).unwrap(), donor);
     }
 
@@ -2284,7 +2395,7 @@ mod tests {
         let current_id = state.corpus.add(Testcase::new(input.clone())).unwrap();
         state.current_id = Some(current_id);
 
-        let operations = applicable_operations(&state, &input).unwrap();
+        let operations = applicable_operations(&state, &input.requests[0]).unwrap();
         assert!(!operations
             .iter()
             .any(|operation| matches!(operation, MutationOp::Crossover)));
@@ -2294,7 +2405,7 @@ mod tests {
     fn oversized_mutation_is_skipped_without_changing_the_original() {
         let mut state = TestState::new(37);
         let mut input = HttpInput::batch_seed();
-        input.path = "x".repeat(NYX_INPUT_BUFFER_SIZE);
+        input.requests[0].path = "x".repeat(NYX_INPUT_BUFFER_SIZE);
         let original = input.clone();
 
         let result = apply_with_size_limit(
@@ -2326,12 +2437,16 @@ mod tests {
         let candidates = mutator.mutation_inputs(&mut state, &input).unwrap();
         assert!(!candidates.is_empty());
         for candidate in candidates {
-            let body_changed =
-                candidate.body != input.body || candidate.body_override != input.body_override;
-            let query_changed = candidate.query != input.query;
-            let header_changed = candidate.headers != input.headers;
-            let cookie_changed = candidate.cookies != input.cookies;
-            let path_changed = candidate.path != input.path;
+            if candidate.requests.len() != input.requests.len() {
+                assert_eq!(candidate.requests[0], input.requests[0]);
+                continue;
+            }
+            let body_changed = candidate.requests[0].body != input.requests[0].body
+                || candidate.requests[0].body_override != input.requests[0].body_override;
+            let query_changed = candidate.requests[0].query != input.requests[0].query;
+            let header_changed = candidate.requests[0].headers != input.requests[0].headers;
+            let cookie_changed = candidate.requests[0].cookies != input.requests[0].cookies;
+            let path_changed = candidate.requests[0].path != input.requests[0].path;
             let changes = [
                 body_changed,
                 query_changed,
@@ -2344,6 +2459,31 @@ mod tests {
             .count();
             assert_eq!(changes, 1);
         }
+    }
+
+    #[test]
+    fn request_list_mutation_can_grow_and_shrink_without_becoming_empty() {
+        let mut state = TestState::new(11);
+        let mut input = input_with_body(JsonValue::Null);
+        input.requests.push(input.requests[0].clone());
+        let before = input.requests.len();
+        let mut grew = false;
+        let mut shrank = false;
+        for _ in 0..32 {
+            let mut candidate = input.clone();
+            if !mutate_request_list(&mut state, &mut candidate).unwrap() {
+                continue;
+            }
+            assert!(!candidate.requests.is_empty());
+            if candidate.requests.len() > before {
+                grew = true;
+            }
+            if candidate.requests.len() < before {
+                shrank = true;
+            }
+        }
+        assert!(grew);
+        assert!(shrank);
     }
 
     #[test]
@@ -2381,11 +2521,11 @@ mod tests {
             let mut input = input_with_body(original.clone());
             assert!(mutate_object_compliant(
                 &mut state,
-                &mut input,
+                &mut input.requests[0],
                 &[],
                 &schema
             ));
-            let JsonValue::Object(fields) = &input.body else {
+            let JsonValue::Object(fields) = &input.requests[0].body else {
                 panic!("object required");
             };
             assert!(fields.iter().any(|(name, _)| name == "keep"));
@@ -2407,13 +2547,13 @@ mod tests {
         let mut input = input_with_body(JsonValue::String(b"a".to_vec()));
         assert!(mutate_scalar_compliant(
             &mut state,
-            &mut input,
+            &mut input.requests[0],
             &[],
             &schema,
             &[],
             &[]
         ));
-        match input.body {
+        match &input.requests[0].body {
             JsonValue::String(bytes) => {
                 assert!(bytes == b"b" || bytes == b"c");
             }

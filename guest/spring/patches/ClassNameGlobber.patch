@@ -1,0 +1,13 @@
+--- a/src/main/java/utils/ClassNameGlobbaer.kt
++++ b/src/main/java/utils/ClassNameGlobbaer.kt
+@@ -33,6 +33,10 @@ private val BASE_EXCLUDED_CLASS_NAME_GLOBS = listOf(
+         "org.springframework.boot.autoconfigure.web.reactive.error.AbstractErrorWebExceptionHandler",
+         "org.springframework.jdbc.**",
+         "com.sun.**", // package for Proxy objects
++        "org.springframework.boot.loader.**",
++        "org.jruby.**",
++        "org.asciidoctor.**",
++        "com.code_intelligence.**",
+         // Azul JDK internals
+         "com.azul.tooling.**",
+         // Kotlin internals

@@ -1,0 +1,88 @@
+--- a/src/main/java/runtime/CoverageMap.java
++++ b/src/main/java/runtime/CoverageMap.java
+@@ -96,67 +96,34 @@
+     // Called by the coverage instrumentation.
+     @SuppressWarnings("unused")
+     public static void recordCoverage(final int id) {
+-        //currentIdThreadLocal.set(id);
+-        if (!Prepare.start)return;
+-
+-        try{
+-            //if (!System.getenv("SpringFuzz")=="SpringFuzz")return;
+-            if (coverageMap[id] == 0){
+-                coverageMap[id]++;
+-                coverageNumber++;
+-
+-                FileWriter writer = new FileWriter("coverageMap.txt", true);
+-
+-                    // 写入内容
+-                writer.write(String.valueOf(coverageNumber));
+-                writer.write("\n"); // 可选，如果想在每次追加写入内容后换行
+-                writer.write(String.valueOf((int) (System.currentTimeMillis()/1000)));
+-                writer.write("\n"); // 可选，如果想在每次追加写入内容后换行
+-                    // 关闭写入流
+-                writer.close();
+-            }
+-        } catch (Exception e){
+-
+-        }
+-        //if (!Prepare.start)return;
+-        try {
+-            HttpServletRequest request = ((ServletRequestAttributes) Objects.requireNonNull(RequestContextHolder.getRequestAttributes())).getRequest();
+-            if (request.getAttribute("cov") == null) {
+-                request.setAttribute("cov", new int[currentNumCounters]);
+-            }
+-            request.setAttribute("edgeId", id);
+-            int[] coverageMapNow = (int[]) request.getAttribute("cov");
+-        /*if (coverageMapThreadLocal.get() == null){
+-            coverageMapThreadLocal.set(new int[currentNumCounters]);
+-        }
+-        currentEdgeIdThreadLocal.set(id);
+-        int[] coverageMapNow = coverageMapThreadLocal.get();*/
+-            coverageMapNow[id] = coverageMapNow[id] + 1;
+-        } catch (Exception e) {
+-            //e.printStackTrace();
+-        }
++        NyxBitmap.hit(id);
+     }
+ 
+     public static Set<Integer> getCoveredIds() {
+         Set<Integer> coveredIds = new HashSet<>();
+-        HttpServletRequest request = ((ServletRequestAttributes) Objects.requireNonNull(RequestContextHolder.getRequestAttributes())).getRequest();
+-        int[] coverageMapNow = (int[]) request.getAttribute("cov");
+-        //int[] coverageMapNow = coverageMapThreadLocal.get();
+-        for (int id = 0; id < currentNumCounters; id++) {
+-            if (coverageMapNow[id] > 0) {
+-                coveredIds.add(id);
++        try {
++            ServletRequestAttributes attributes = (ServletRequestAttributes) RequestContextHolder.getRequestAttributes();
++            if (attributes == null) {
++                return coveredIds;
+             }
++            Object value = attributes.getRequest().getAttribute("cov");
++            if (!(value instanceof int[])) {
++                return coveredIds;
++            }
++            int[] coverageMapNow = (int[]) value;
++            for (int id = 0; id < coverageMapNow.length; id++) {
++                if (coverageMapNow[id] > 0) {
++                    coveredIds.add(id);
++                }
++            }
++        } catch (Exception ignored) {
++            return coveredIds;
+         }
+         return Collections.unmodifiableSet(coveredIds);
+     }
+ 
+     public static void replayCoveredIds(Set<Integer> coveredIds) {
+-        HttpServletRequest request = ((ServletRequestAttributes) Objects.requireNonNull(RequestContextHolder.getRequestAttributes())).getRequest();
+-        int[] coverageMapNow = (int[]) request.getAttribute("cov");
+-        //int[] coverageMapNow = coverageMapThreadLocal.get();
+-        for (int id : coveredIds) {
+-            coverageMapNow[id] = 1;
+-        }
++        return;
+     }
+ 
+     private static void logInfo(String message) {

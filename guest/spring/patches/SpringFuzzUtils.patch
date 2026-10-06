@@ -1,0 +1,26 @@
+--- a/src/main/java/utils/SpringFuzzUtils.java
++++ b/src/main/java/utils/SpringFuzzUtils.java
+@@ -24,7 +24,7 @@ public class SpringFuzzUtils {
+                 request.setAttribute("securityTypes", hashSet);
+             }
+             ((HashSet<String>)request.getAttribute("securityTypes")).add(type);
+-        } catch (Exception ignored) {
++        } catch (Throwable ignored) {
+ 
+         }
+         /*if (CoverageMap.securityTypesThreadLocal.get() == null){
+@@ -44,7 +44,13 @@ public class SpringFuzzUtils {
+                 request.setAttribute("securityDetected", hashSet);
+             }
+             ((HashSet<String>)request.getAttribute("securityDetected")).add(type);
+-        } catch (Exception ignored) {
++        } catch (Throwable ignored) {
++            // The agent class loader cannot see the application's Spring types.
++        }
++        try (java.io.FileWriter writer = new java.io.FileWriter("/tmp/bug_triggered", true)) {
++            writer.write(type);
++            writer.write('\n');
++        } catch (java.io.IOException ignored) {
+ 
+         }
+         /*if (CoverageMap.securityDetectedThreadLocal.get() == null){

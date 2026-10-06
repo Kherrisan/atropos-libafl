@@ -4,6 +4,20 @@
 
 int nyx_get_bitmap_size(void);
 
+int nyx_bitmap_set_count(void) {
+	if (!trace_buffer) {
+		return -1;
+	}
+	int size = nyx_get_bitmap_size();
+	int count = 0;
+	for (int i = 0; i < size; ++i) {
+		if (trace_buffer[i] != 0) {
+			count++;
+		}
+	}
+	return count;
+}
+
 static uint8_t *atropos_coverage_baseline = NULL;
 static uint32_t atropos_coverage_baseline_size = 0;
 

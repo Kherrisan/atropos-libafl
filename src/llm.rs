@@ -264,7 +264,9 @@ impl LlmAgent {
         for (index, mut candidate) in candidates.into_iter().enumerate() {
             candidate.coverage_dump = false;
             candidate.redqueen = false;
-            candidate.pin_route = false;
+            for request in &mut candidate.requests {
+                request.pin_route = false;
+            }
             eprintln!(
                 "llm generated [{}/{}] {}",
                 index + 1,
@@ -479,38 +481,34 @@ pub fn parse_http_input(text: &str) -> Option<HttpInput> {
     let mut found = None;
     for (index, _) in bytes.iter().enumerate().filter(|(_, byte)| **byte == b'{') {
         let slice = &text[index..];
-        let mut deserializer = serde_json::Deserializer::from_str(slice);
-        if let Ok(input) = HttpInput::deserialize(&mut deserializer) {
+        if let Ok(input) = crate::input::input_from_json_prefix(slice) {
             found = Some(input);
         }
     }
     found
 }
 
-#[derive(Deserialize)]
-struct HttpInputBatch {
-    requests: Vec<HttpInput>,
-}
-
-/// Parse a JSON array, a `{"requests": [...]}` envelope, or one legacy input.
+/// Parse a JSON array of inputs, or one input object. A `requests` array is one input.
 pub fn parse_http_inputs(text: &str) -> Option<Vec<HttpInput>> {
     let bytes = text.as_bytes();
     for (index, _) in bytes.iter().enumerate().filter(|(_, byte)| **byte == b'[') {
         let slice = &text[index..];
         let mut deserializer = serde_json::Deserializer::from_str(slice);
-        if let Ok(inputs) = Vec::<HttpInput>::deserialize(&mut deserializer) {
+        if let Ok(values) = Vec::<serde_json::Value>::deserialize(&mut deserializer) {
+            let mut inputs = Vec::new();
+            for value in values {
+                let Ok(text) = serde_json::to_string(&value) else {
+                    inputs.clear();
+                    break;
+                };
+                let Ok(input) = crate::input::input_from_json_prefix(&text) else {
+                    inputs.clear();
+                    break;
+                };
+                inputs.push(input);
+            }
             if !inputs.is_empty() {
                 return Some(inputs);
-            }
-        }
-    }
-
-    for (index, _) in bytes.iter().enumerate().filter(|(_, byte)| **byte == b'{') {
-        let slice = &text[index..];
-        let mut deserializer = serde_json::Deserializer::from_str(slice);
-        if let Ok(batch) = HttpInputBatch::deserialize(&mut deserializer) {
-            if !batch.requests.is_empty() {
-                return Some(batch.requests);
             }
         }
     }
@@ -542,7 +540,7 @@ mod tests {
     fn parses_json_inside_prose() {
         let text = "说明\n```json\n{\"method\":\"POST\",\"path\":\"/wp-json/batch/v1\",\"query\":[],\"headers\":[],\"cookies\":[],\"body\":{\"Object\":[[\"title\",{\"String\":[115,101,101,100]}]]},\"body_override\":null,\"operation_key\":null,\"pin_route\":true,\"exec_limit\":0,\"redqueen\":false,\"coverage_dump\":false}\n```";
         let input = parse_http_input(text).expect("json");
-        assert_eq!(input.method, "POST");
+        assert_eq!(input.requests[0].method, "POST");
         assert!(!input.coverage_dump);
     }
 }

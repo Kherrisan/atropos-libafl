@@ -1,0 +1,46 @@
+--- a/src/main/java/init/WebInit.java
++++ b/src/main/java/init/WebInit.java
+@@ -25,7 +25,26 @@
+             targetClassName = "org.springframework.boot.SpringApplication",
+             targetMethod = "run")
+     public static void addInitSocket(MethodHandle method, Object thisObject, Object[] arguments, int hookId) throws Throwable {
+-        //UnixDomainSocket.setUnixSocket(thisObject);
++        if (!(thisObject instanceof org.springframework.boot.SpringApplication)) {
++            return;
++        }
++        org.springframework.boot.SpringApplication app = (org.springframework.boot.SpringApplication) thisObject;
++        String sock = System.getenv("ATROPOS_SPRING_SOCK");
++        if (sock == null || sock.isEmpty()) {
++            sock = "/tmp/spring.sock";
++        }
++        boolean webgoat = false;
++        for (Object source : app.getAllSources()) {
++            if (source instanceof Class && "org.owasp.webgoat.container.WebGoat".equals(((Class) source).getName())) {
++                webgoat = true;
++                break;
++            }
++        }
++        if (!webgoat) {
++            sock = sock + ".webwolf";
++        }
++        System.setProperty("atropos.spring.sock", sock);
++        UnixDomainSocket.setUnixSocket(thisObject);
+     }
+ 
+     @MethodHook(
+@@ -36,9 +55,12 @@
+         if (RouteConfig.applicationContext == null) {
+             return;
+         }
+-        RouteConfig.getAllRouteMapping();
+-        ReturnFilter.setReturnFilter();
+-        RequestFilter.setRequestFilter();
++        try {
++            ReturnFilter.setReturnFilter();
++            RequestFilter.setRequestFilter();
++        } catch (Throwable error) {
++            error.printStackTrace();
++        }
+ 
+ 
+         /*RequestMappingHandlerMapping mapping;

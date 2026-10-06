@@ -1,0 +1,22 @@
+--- a/src/main/java/instrumentor/Hooks.kt
++++ b/src/main/java/instrumentor/Hooks.kt
+@@ -78,9 +78,16 @@
+                     }.map {
+                         it to hookClass
+                     }
+-                } catch (e: ClassNotFoundException) {
+-                    Log.warn("Failed to load hooks from $hookClassName", e)
+-                    emptyList()
++                } catch (e: Throwable) {
++                    val hooksJar = System.getProperty("atropos.hooks.jar")
++                    if (hooksJar.isNullOrEmpty()) {
++                        Log.warn("Failed to load hooks from $hookClassName", e)
++                        emptyList()
++                    } else {
++                        HookScanner.scan(hooksJar, hookClassName).also {
++                            Log.info("Loaded ${it.size} hooks from $hookClassName without initializing it")
++                        }.map { it to Void::class.java }
++                    }
+                 }
+             }
+ 

@@ -1,0 +1,27 @@
+--- a/src/main/java/agent/WebAgent.java
++++ b/src/main/java/agent/WebAgent.java
+@@ -1,18 +1,18 @@
+ package agent;
+-
+-import utils.SpringFuzzUtils;
+ 
+ import java.lang.instrument.Instrumentation;
+ 
+ public class WebAgent {
+     public static void premain(String agentArgs, Instrumentation instrumentation){
+-        SpringFuzzUtils.deleteFile("output.json");
+-        SpringFuzzUtils.deleteFile("param.json");
++        if (agentArgs != null && !agentArgs.isEmpty()) {
++            System.setProperty("atropos.hooks.jar", agentArgs);
++        }
+         AgentKt.install(instrumentation);
+     }
+     public static void agentmain(String agentArgs, Instrumentation instrumentation){
+-        SpringFuzzUtils.deleteFile("output.json");
+-        SpringFuzzUtils.deleteFile("param.json");
++        if (agentArgs != null && !agentArgs.isEmpty()) {
++            System.setProperty("atropos.hooks.jar", agentArgs);
++        }
+         AgentKt.install(instrumentation);
+     }
+ }

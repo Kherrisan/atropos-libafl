@@ -1,0 +1,36 @@
+--- a/src/main/java/agent/Agent.kt
++++ b/src/main/java/agent/Agent.kt
+@@ -21,8 +21,24 @@ fun installInternal(
+     trace: List<String> = listOf(),
+     dumpClassesDir: String = "dumpClasses",
+     additionalClassesExcludes: List<String> = listOf(),
+ ) {
+-    val customHookNames = listOf<String>("sanitizers.CommandInjection", "sanitizers.ServerSideRequestForgery", "sanitizers.SqlInjection", "sanitizers.FilePathInjection","sanitizers.XXEInjection", "init.WebInit") //修改为sanitizer
++    val customHookNames = listOf<String>(
++            "com.code_intelligence.jazzer.sanitizers.SqlInjection",
++            "com.code_intelligence.jazzer.sanitizers.OsCommandInjection",
++            "com.code_intelligence.jazzer.sanitizers.FilePathTraversal",
++            "com.code_intelligence.jazzer.sanitizers.ServerSideRequestForgery",
++            "com.code_intelligence.jazzer.sanitizers.LdapInjection",
++            "com.code_intelligence.jazzer.sanitizers.XPathInjection",
++            "com.code_intelligence.jazzer.sanitizers.ExpressionLanguageInjection",
++            "com.code_intelligence.jazzer.sanitizers.ScriptEngineInjection",
++            "com.code_intelligence.jazzer.sanitizers.TemplateInjection",
++            "com.code_intelligence.jazzer.sanitizers.Deserialization",
++            "com.code_intelligence.jazzer.sanitizers.ReflectiveCall",
++            "com.code_intelligence.jazzer.sanitizers.NamingContextLookup",
++            "com.code_intelligence.jazzer.sanitizers.RegexInjection",
++            "sanitizers.XXEInjection",
++            "init.WebInit",
++    )
+     val classNameGlobber = ClassNameGlobber(listOf(Prepare.fullName + ".**"), customHookNames)
+     CoverageRecorder.classNameGlobber = classNameGlobber
+     val customHookClassNameGlobber = ClassNameGlobber(listOf(Prepare.fullName + ".**"), customHookNames)
+@@ -98,7 +114,8 @@ fun installInternal(
+             // to a JDK bug that was not backported.
+             !(it.name.startsWith("agent.")||it.name.startsWith("api.")||it.name.startsWith("instrumentor.")||
+                     it.name.startsWith("org.jacoco.core.")||it.name.startsWith("runtime.")||it.name.startsWith("utils.")||it.name.startsWith("sanitizers."))
++                    && !it.name.startsWith("com.code_intelligence.")
+                     &&
+                     (
+                             classNameGlobber.includes(it.name) ||

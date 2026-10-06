@@ -1,0 +1,23 @@
+--- a/src/main/java/init/MyTomcatWebServerFactoryCustomizer.java
++++ b/src/main/java/init/MyTomcatWebServerFactoryCustomizer.java
+@@ -4,12 +4,16 @@
+ import org.springframework.boot.web.server.WebServerFactoryCustomizer;
+ 
+ public class MyTomcatWebServerFactoryCustomizer implements WebServerFactoryCustomizer<TomcatServletWebServerFactory> {
++    private final String socketPath;
++
++    public MyTomcatWebServerFactoryCustomizer() {
++        String path = System.getProperty("atropos.spring.sock", "/tmp/spring.sock");
++        this.socketPath = path == null || path.isEmpty() ? "/tmp/spring.sock" : path;
++    }
+ 
+     @Override
+     public void customize(TomcatServletWebServerFactory server) {
+-        server.addConnectorCustomizers((connector) -> {
+-                    connector.setProperty("unixDomainSocketPath","D:\\Studying\\Programming\\fuzz\\毕设\\SpringFuzz\\target\\http.sock");
+-                }
+-        );
++        final String path = socketPath;
++        server.addConnectorCustomizers((connector) -> connector.setProperty("unixDomainSocketPath", path));
+     }
+ }

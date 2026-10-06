@@ -1,0 +1,15 @@
+--- a/src/main/java/init/Prepare.java
++++ b/src/main/java/init/Prepare.java
+@@ -2,10 +2,8 @@
+ 
+ public class Prepare {
+     public static boolean start = false;
+-    //public static String fullName = "com.example.javawebtest";
+-    //public static String fullName = "org.owasp.webgoat";
+-    public static String fullName = "com.example.sqlTest";
+-    public static String excludeFolderName = "C:\\Users\\75468\\.webgoat-2023.8";
++    public static String fullName = "org.owasp.webgoat.lessons";
++    public static String excludeFolderName = "/var/lib/webgoat-home/.webgoat-2023.8";
+     public static void initPreparation(){
+         start = true;
+     }

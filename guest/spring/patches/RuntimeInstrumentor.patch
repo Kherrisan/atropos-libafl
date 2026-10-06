@@ -1,0 +1,12 @@
+--- a/src/main/java/agent/RuntimeInstrumentor.kt
++++ b/src/main/java/agent/RuntimeInstrumentor.kt
+@@ -48,6 +48,9 @@
+         // failures. The docs advise to use a top-level try-catch.
+         // https://docs.oracle.com/javase/9/docs/api/java/lang/instrument/ClassFileTransformer.html
+         return try {
++            if (loader == null || !loader.javaClass.name.contains("LaunchedURLClassLoader")) {
++                return null
++            }
+             if (instrumentOnly && protectionDomain != null) {
+                 var outputPathPrefix = protectionDomain.getCodeSource().getLocation().getFile().toString()
+                 if (outputPathPrefix.isNotEmpty()) {

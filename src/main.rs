@@ -16,15 +16,16 @@ use input::{HttpInput, NYX_INPUT_BUFFER_SIZE};
 use libafl::{
     corpus::{Corpus, OnDiskCorpus, Testcase},
     events::SimpleEventManager,
+    executors::HasObservers,
     feedback_or,
-    feedbacks::{CrashFeedback, MaxMapFeedback},
-    fuzzer::{Evaluator, Fuzzer},
+    feedbacks::{CrashFeedback, Feedback, MaxMapFeedback},
+    fuzzer::{ExecutesInput, Fuzzer},
     inputs::Input,
     monitors::SimpleMonitor,
     observers::StdMapObserver,
     schedulers::QueueScheduler,
-    state::{HasCorpus, HasSolutions, StdState},
-    StdFuzzer,
+    state::{HasCorpus, HasExecutions, HasSolutions, StdState},
+    HasFeedback, HasObjective, StdFuzzer,
 };
 use libafl_bolts::{rands::StdRand, tuples::tuple_list};
 use libafl_nyx::{executor::NyxExecutor, helper::NyxHelper, settings::NyxSettings};
@@ -169,7 +170,7 @@ fn run(args: cli::Args) -> Result<(), Box<dyn std::error::Error>> {
     let corpus_dir = args.corpus_dir.clone();
     let objectives_dir = args.objectives_dir.clone();
     let corpus_ready = corpus_has_inputs(&corpus_dir);
-    let (startup_seeds, seed_tokens) = if let Some(dir) = args.seed_dir() {
+    let (mut startup_seeds, mut seed_tokens) = if let Some(dir) = args.seed_dir() {
         let seeds = input::load_seed_directory(&dir)?;
         let tokens = input::dictionary_tokens(&seeds);
         eprintln!(
@@ -216,6 +217,21 @@ fn run(args: cli::Args) -> Result<(), Box<dyn std::error::Error>> {
     fs::create_dir_all(&corpus_dir)?;
     fs::create_dir_all(&objectives_dir)?;
     fs::create_dir_all(&dump_dir)?;
+    if let Some(cookie) = input::read_session_cookie(&dump_dir) {
+        if let Some(dir) = args.seed_dir() {
+            let updated = input::write_session_cookie(dir, &cookie)?;
+            eprintln!(
+                "session: wrote JSESSIONID into {updated} seed file(s) in {}",
+                dir.display()
+            );
+        }
+        for seed in &mut startup_seeds {
+            input::set_jsessionid(seed, &cookie);
+        }
+        if !startup_seeds.is_empty() {
+            seed_tokens = input::dictionary_tokens(&startup_seeds);
+        }
+    }
     let php_cli_log = dump_dir.join(oracle::PHP_CLI_LOG_NAME);
     let log_observer = oracle::PhpCliLogObserver::new(php_cli_log.clone());
 
@@ -246,7 +262,44 @@ fn run(args: cli::Args) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("corpus: resumed {resumed} on-disk input(s)");
     }
     for seed in startup_seeds {
-        fuzzer.add_input(&mut state, &mut executor, &mut manager, seed)?;
+        // add_input returns before recording coverage when the seed is also an
+        // oracle solution, which leaves the queue empty. Record the map either way.
+        let exit_kind = fuzzer.execute_input(&mut state, &mut executor, &mut manager, &seed)?;
+        let observers = executor.observers();
+        let is_solution = fuzzer.objective_mut().is_interesting(
+            &mut state,
+            &mut manager,
+            &seed,
+            &*observers,
+            &exit_kind,
+        )?;
+        let _interesting = fuzzer.feedback_mut().is_interesting(
+            &mut state,
+            &mut manager,
+            &seed,
+            &*observers,
+            &exit_kind,
+        )?;
+        if is_solution {
+            let mut solution = Testcase::from(seed.clone());
+            solution.set_executions(*state.executions());
+            fuzzer.objective_mut().append_metadata(
+                &mut state,
+                &mut manager,
+                &*observers,
+                &mut solution,
+            )?;
+            state.solutions_mut().add(solution)?;
+        }
+        let mut testcase = Testcase::from(seed);
+        testcase.set_executions(*state.executions());
+        fuzzer.feedback_mut().append_metadata(
+            &mut state,
+            &mut manager,
+            &*observers,
+            &mut testcase,
+        )?;
+        state.corpus_mut().add(testcase)?;
     }
 
     let mutator = InputMutator::new(

@@ -22,8 +22,18 @@ impl QueueInputSummary {
     pub fn new(id: usize, input: &HttpInput) -> Self {
         Self {
             id,
-            method: input.method.clone(),
-            path: input.path.clone(),
+            method: input
+                .requests
+                .iter()
+                .map(|request| request.method.clone())
+                .collect::<Vec<_>>()
+                .join("; "),
+            path: input
+                .requests
+                .iter()
+                .map(|request| request.path.clone())
+                .collect::<Vec<_>>()
+                .join("; "),
             summary: input.summary(),
         }
     }

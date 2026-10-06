@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+LEGACY_ROOT="${ATROPOS_LEGACY_ROOT:-$(cd -- "$REPO_ROOT/../atropos-legacy" && pwd)}"
+DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}/spring"
+GUEST_DIR="$DATA_DIR/guest"
+BUNDLE_DIR="$DATA_DIR/bundle"
+
+for path in "$GUEST_DIR/spring-runtime" "$GUEST_DIR/webgoat.jar" "$GUEST_DIR/springfuzz-agent.jar" "$GUEST_DIR/springfuzz-hooks.jar" \
+	"$GUEST_DIR/atropos_spring_agent" "$GUEST_DIR/lib/libatropos_nyx_bitmap.so" "$GUEST_DIR/jre/bin/java" \
+	"$GUEST_DIR/openapi.json" "$LEGACY_ROOT/fuzzer/nyx.h"; do
+	if [[ ! -e "$path" ]]; then
+		printf 'Required Spring guest input is missing: %s\n' "$path" >&2
+		exit 1
+	fi
+done
+if [[ "$(cat "$GUEST_DIR/spring-runtime")" != spring-nyx-webgoat-2023.8 ]]; then
+	printf 'Spring guest artifacts are stale; rerun scripts/build-nyx-spring.sh\n' >&2
+	exit 1
+fi
+
+mkdir -p "$BUNDLE_DIR"
+chmod 700 "$DATA_DIR" "$BUNDLE_DIR"
+rm -rf "$BUNDLE_DIR/runtime" "$BUNDLE_DIR/install-guest.sh" "$BUNDLE_DIR/atropos-nyx-preimage"
+mkdir -p "$BUNDLE_DIR/runtime"
+cp -a "$GUEST_DIR/webgoat.jar" "$GUEST_DIR/springfuzz-agent.jar" "$GUEST_DIR/springfuzz-hooks.jar" "$GUEST_DIR/extra" \
+	"$GUEST_DIR/lib" "$GUEST_DIR/jre" "$GUEST_DIR/openapi.json" "$BUNDLE_DIR/runtime/"
+if [[ -f "$GUEST_DIR/seeds/sql-injection.json" ]]; then
+	mkdir -p "$BUNDLE_DIR/runtime/seeds"
+	cp -- "$GUEST_DIR/seeds/sql-injection.json" "$BUNDLE_DIR/runtime/seeds/"
+fi
+cp -- "$GUEST_DIR/atropos_spring_agent" "$BUNDLE_DIR/atropos_spring_agent"
+
+cat >"$BUNDLE_DIR/nyx-preimage.c" <<'C'
+#define NO_PT_NYX
+#include "nyx.h"
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+	if (argc == 2 && strcmp(argv[1], "--check") == 0) {
+		return is_nyx_vcpu() ? 0 : 1;
+	}
+	if (!is_nyx_vcpu()) {
+		return 0;
+	}
+	if (system("systemctl disable atropos-nyx-preimage.service") != 0) {
+		return 1;
+	}
+	kAFL_hypercall(HYPERCALL_KAFL_LOCK, 0);
+	return 0;
+}
+C
+gcc -static -O2 -I"$LEGACY_ROOT/fuzzer" -o "$BUNDLE_DIR/atropos-nyx-preimage" "$BUNDLE_DIR/nyx-preimage.c"
+rm -f -- "$BUNDLE_DIR/nyx-preimage.c"
+chmod 0755 "$BUNDLE_DIR/atropos-nyx-preimage" "$BUNDLE_DIR/atropos_spring_agent"
+
+cat >"$BUNDLE_DIR/atropos-nyx-launch" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+export LD_LIBRARY_PATH=/usr/local/lib/atropos-spring/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+exec /usr/local/bin/atropos_spring_agent
+EOF
+chmod 0755 "$BUNDLE_DIR/atropos-nyx-launch"
+
+cat >"$BUNDLE_DIR/install-guest.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+umask 022
+cd /root/atropos-nyx
+install -d -o root -g root -m 0755 /usr/local/lib/atropos-spring /var/lib/webgoat-home
+cp -a runtime/webgoat.jar runtime/springfuzz-agent.jar runtime/springfuzz-hooks.jar runtime/jre runtime/lib runtime/extra \
+	/usr/local/lib/atropos-spring/
+if [[ -f runtime/openapi.json ]]; then
+	cp -- runtime/openapi.json /usr/local/lib/atropos-spring/openapi.json
+fi
+cp -- atropos_spring_agent /usr/local/bin/atropos_spring_agent
+cp -- atropos-nyx-preimage /usr/local/bin/atropos-nyx-preimage
+cp -- atropos-nyx-launch /usr/local/bin/atropos-nyx-launch
+chmod 0755 /usr/local/bin/atropos_spring_agent /usr/local/bin/atropos-nyx-preimage \
+	/usr/local/bin/atropos-nyx-launch /usr/local/lib/atropos-spring/jre/bin/java
+cat >/etc/systemd/system/atropos-nyx-agent.service <<'UNIT'
+[Unit]
+Description=Atropos Nyx Spring guest agent
+After=atropos-nyx-preimage.service
+Requires=atropos-nyx-preimage.service
+
+[Service]
+Type=simple
+WorkingDirectory=/
+ExecStart=/usr/local/bin/atropos-nyx-launch
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+cat >/etc/systemd/system/atropos-nyx-preimage.service <<'UNIT'
+[Unit]
+Description=Create the Nyx pre-snapshot and continue guest boot
+Before=atropos-nyx-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/atropos-nyx-preimage
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable atropos-nyx-agent.service
+systemctl enable atropos-nyx-preimage.service
+rm -rf /root/atropos-nyx
+EOF
+chmod 0700 "$BUNDLE_DIR/install-guest.sh"
+tar -C "$BUNDLE_DIR" -czf "$BUNDLE_DIR/guest-bundle.tar.gz" \
+	runtime atropos_spring_agent atropos-nyx-preimage atropos-nyx-launch install-guest.sh
+printf 'Spring guest bundle: %s\n' "$BUNDLE_DIR/guest-bundle.tar.gz"

@@ -223,7 +223,7 @@ fn push_json_string(out: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
-pub struct HttpInput {
+pub struct HttpRequest {
     pub method: String,
     pub path: String,
     pub query: Vec<(String, Vec<u8>)>,
@@ -233,6 +233,12 @@ pub struct HttpInput {
     pub body_override: Option<Vec<u8>>,
     pub operation_key: Option<String>,
     pub pin_route: bool,
+}
+
+/// One Nyx execution. `requests` are sent in order inside the same restored snapshot.
+#[derive(Clone, Debug, Serialize, Deserialize, Hash, PartialEq, Eq)]
+pub struct HttpInput {
+    pub requests: Vec<HttpRequest>,
     pub exec_limit: u32,
     pub redqueen: bool,
     #[serde(default)]
@@ -263,33 +269,7 @@ impl HasTargetBytes for HttpInput {
     }
 }
 
-impl HttpInput {
-    pub fn batch_seed() -> Self {
-        let body = serde_json::json!({
-            "validation": "normal",
-            "requests": [{
-                "method": "POST",
-                "path": "/wp/v2/posts",
-                "body": {"title": "seed"},
-                "headers": {}
-            }]
-        });
-        Self {
-            method: "POST".to_string(),
-            path: "/wp-json/batch/v1".to_string(),
-            query: Vec::new(),
-            headers: Vec::new(),
-            cookies: Vec::new(),
-            body: JsonValue::from_json(&body),
-            body_override: None,
-            operation_key: Some("POST /wp-json/batch/v1".to_string()),
-            pin_route: true,
-            exec_limit: 0,
-            redqueen: false,
-            coverage_dump: false,
-        }
-    }
-
+impl HttpRequest {
     pub fn summary(&self) -> String {
         let owned = String::from_utf8_lossy(&self.body_bytes()).into_owned();
         let body: String = owned.chars().take(180).collect();
@@ -298,24 +278,6 @@ impl HttpInput {
 
     pub fn content_type(&self) -> &'static str {
         "application/json"
-    }
-
-    /// Human-readable request. This is not a second corpus format.
-    fn plaintext_json(&self) -> serde_json::Value {
-        serde_json::json!({
-            "method": self.method,
-            "path": self.path,
-            "query": pairs_plain(&self.query),
-            "headers": pairs_plain(&self.headers),
-            "cookies": pairs_plain(&self.cookies),
-            "body": json_value_plain(&self.body),
-            "body_override": self.body_override.as_deref().map(override_plain),
-            "operation_key": self.operation_key,
-            "pin_route": self.pin_route,
-            "exec_limit": self.exec_limit,
-            "redqueen": self.redqueen,
-            "coverage_dump": self.coverage_dump,
-        })
     }
 
     pub fn body_bytes(&self) -> Vec<u8> {
@@ -343,7 +305,7 @@ impl HttpInput {
             .join("; ")
     }
 
-    fn nyx_payload(&self) -> Vec<u8> {
+    fn nyx_request(&self) -> serde_json::Map<String, serde_json::Value> {
         let body = self.body_bytes();
         let body_text = String::from_utf8_lossy(&body).into_owned();
         let mut request = serde_json::Map::new();
@@ -382,7 +344,76 @@ impl HttpInput {
                 );
             }
         }
+        request
+    }
 
+    fn plaintext_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "method": self.method,
+            "path": self.path,
+            "query": pairs_plain(&self.query),
+            "headers": pairs_plain(&self.headers),
+            "cookies": pairs_plain(&self.cookies),
+            "body": json_value_plain(&self.body),
+            "body_override": self.body_override.as_deref().map(override_plain),
+            "operation_key": self.operation_key,
+            "pin_route": self.pin_route,
+        })
+    }
+}
+
+impl HttpInput {
+    pub fn from_request(request: HttpRequest) -> Self {
+        Self {
+            requests: vec![request],
+            exec_limit: 0,
+            redqueen: false,
+            coverage_dump: false,
+        }
+    }
+
+    pub fn batch_seed() -> Self {
+        let body = serde_json::json!({
+            "validation": "normal",
+            "requests": [{
+                "method": "POST",
+                "path": "/wp/v2/posts",
+                "body": {"title": "seed"},
+                "headers": {}
+            }]
+        });
+        Self::from_request(HttpRequest {
+            method: "POST".to_string(),
+            path: "/wp-json/batch/v1".to_string(),
+            query: Vec::new(),
+            headers: Vec::new(),
+            cookies: Vec::new(),
+            body: JsonValue::from_json(&body),
+            body_override: None,
+            operation_key: Some("POST /wp-json/batch/v1".to_string()),
+            pin_route: true,
+        })
+    }
+
+    pub fn summary(&self) -> String {
+        self.requests
+            .iter()
+            .map(HttpRequest::summary)
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    /// Human-readable input. This is not a second corpus format.
+    fn plaintext_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "requests": self.requests.iter().map(HttpRequest::plaintext_json).collect::<Vec<_>>(),
+            "exec_limit": self.exec_limit,
+            "redqueen": self.redqueen,
+            "coverage_dump": self.coverage_dump,
+        })
+    }
+
+    fn nyx_payload(&self) -> Vec<u8> {
         let mut config = serde_json::Map::new();
         let nyx_cpu = std::env::var("ATROPOS_NYX_CPU")
             .ok()
@@ -401,9 +432,10 @@ impl HttpInput {
                 serde_json::Value::String(self.exec_limit.to_string()),
             );
         }
+        let requests: Vec<_> = self.requests.iter().map(HttpRequest::nyx_request).collect();
         let payload = serde_json::json!({
             "config": config,
-            "requests": [request],
+            "requests": requests,
         });
         let mut bytes = serde_json::to_vec(&payload).expect("Nyx payload serialization");
         // The guest agent reads this buffer as a C string before parsing its JSON.
@@ -446,7 +478,7 @@ fn pairs_plain(pairs: &[(String, Vec<u8>)]) -> serde_json::Value {
     )
 }
 
-const SEED_FIELDS: &[&str] = &[
+const REQUEST_FIELDS: &[&str] = &[
     "method",
     "path",
     "query",
@@ -456,10 +488,9 @@ const SEED_FIELDS: &[&str] = &[
     "body_override",
     "operation_key",
     "pin_route",
-    "exec_limit",
-    "redqueen",
-    "coverage_dump",
 ];
+
+const INPUT_FIELDS: &[&str] = &["requests", "exec_limit", "redqueen", "coverage_dump"];
 
 /// Load one seed from each top-level `*.json` file that matches the seed format.
 ///
@@ -521,25 +552,176 @@ pub fn load_seed_directory(dir: &std::path::Path) -> Result<Vec<HttpInput>, Stri
     Ok(seeds)
 }
 
+/// Cookie value published by the Spring guest before it takes the Nyx snapshot.
+pub fn read_session_cookie(dump_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dump_dir.join("session-cookie.txt")).ok()?;
+    let cookie = text.trim();
+    if cookie.is_empty() || cookie.contains(['\n', '\r', ';', ' ', '\0']) {
+        return None;
+    }
+    Some(cookie.to_string())
+}
+
+/// Replace or insert `JSESSIONID` on a fuzzer input. Other cookies stay in place.
+pub fn set_jsessionid(input: &mut HttpInput, value: &str) {
+    for request in &mut input.requests {
+        request
+            .cookies
+            .retain(|(key, _)| !key.eq_ignore_ascii_case("JSESSIONID"));
+        request
+            .cookies
+            .push(("JSESSIONID".to_string(), value.as_bytes().to_vec()));
+    }
+}
+
+/// Write the guest session into every valid seed file. The fuzzer then puts that
+/// cookie on the request through the normal seed payload.
+pub fn write_session_cookie(dir: &Path, cookie: &str) -> Result<usize, String> {
+    if !dir.is_dir() {
+        return Err(format!("seed directory does not exist: {}", dir.display()));
+    }
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(dir)
+        .map_err(|err| format!("cannot read seed directory {}: {err}", dir.display()))?
+    {
+        let entry =
+            entry.map_err(|err| format!("cannot read seed directory {}: {err}", dir.display()))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if name.starts_with('.') || !name.ends_with(".json") {
+            continue;
+        }
+        if !entry.metadata().is_ok_and(|meta| meta.is_file()) {
+            continue;
+        }
+        names.push(name.to_string());
+    }
+    names.sort();
+
+    let mut updated = 0;
+    for name in names {
+        let path = dir.join(&name);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|err| format!("cannot read seed {}: {err}", path.display()))?;
+        if parse_seed_json(&text).is_err() {
+            continue;
+        }
+        let mut value: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|err| format!("cannot parse seed {}: {err}", path.display()))?;
+        let Some(object) = value.as_object_mut() else {
+            continue;
+        };
+        if let Some(requests) = object.get_mut("requests") {
+            let Some(items) = requests.as_array_mut() else {
+                continue;
+            };
+            for item in items {
+                let Some(request) = item.as_object_mut() else {
+                    continue;
+                };
+                if let Some(cookies) = request.get_mut("cookies") {
+                    upsert_jsessionid(cookies, cookie);
+                } else {
+                    request.insert(
+                        "cookies".to_string(),
+                        serde_json::json!([["JSESSIONID", cookie]]),
+                    );
+                }
+            }
+        } else if let Some(cookies) = object.get_mut("cookies") {
+            upsert_jsessionid(cookies, cookie);
+        } else {
+            object.insert(
+                "cookies".to_string(),
+                serde_json::json!([["JSESSIONID", cookie]]),
+            );
+        }
+        let mut encoded = serde_json::to_vec_pretty(&value)
+            .map_err(|err| format!("cannot encode seed {}: {err}", path.display()))?;
+        encoded.push(b'\n');
+        std::fs::write(&path, encoded)
+            .map_err(|err| format!("cannot write seed {}: {err}", path.display()))?;
+        updated += 1;
+    }
+    Ok(updated)
+}
+
+fn upsert_jsessionid(cookies: &mut serde_json::Value, value: &str) {
+    match cookies {
+        serde_json::Value::Object(map) => {
+            let stale: Vec<String> = map
+                .keys()
+                .filter(|key| {
+                    key.eq_ignore_ascii_case("JSESSIONID") && key.as_str() != "JSESSIONID"
+                })
+                .cloned()
+                .collect();
+            for key in stale {
+                map.remove(&key);
+            }
+            map.insert(
+                "JSESSIONID".to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+        serde_json::Value::Array(items) => {
+            let mut found = false;
+            for item in items.iter_mut() {
+                let Some(pair) = item.as_array_mut() else {
+                    continue;
+                };
+                let matches = pair
+                    .first()
+                    .and_then(|key| key.as_str())
+                    .is_some_and(|key| key.eq_ignore_ascii_case("JSESSIONID"));
+                if !matches {
+                    continue;
+                }
+                if pair.len() == 1 {
+                    pair.push(serde_json::Value::String(value.to_string()));
+                } else {
+                    pair[1] = serde_json::Value::String(value.to_string());
+                }
+                found = true;
+            }
+            if !found {
+                items.push(serde_json::json!(["JSESSIONID", value]));
+            }
+        }
+        other => {
+            *other = serde_json::json!([["JSESSIONID", value]]);
+        }
+    }
+}
+
 /// Object keys and scalar values from every seed, in seed order, without duplicates.
 pub fn dictionary_tokens(seeds: &[HttpInput]) -> Vec<String> {
     let mut tokens = Vec::new();
     for seed in seeds {
-        push_token(&mut tokens, &seed.method);
-        push_token(&mut tokens, &seed.path);
-        for (key, value) in seed.query.iter().chain(&seed.headers).chain(&seed.cookies) {
-            push_token(&mut tokens, key);
-            push_token(&mut tokens, &String::from_utf8_lossy(value));
-        }
-        collect_json_tokens(&seed.body, &mut tokens);
-        if let Some(key) = &seed.operation_key {
-            push_token(&mut tokens, key);
-        }
-        if let Some(raw) = &seed.body_override {
-            let text = String::from_utf8_lossy(raw);
-            match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(value) => collect_json_value_tokens(&value, &mut tokens),
-                Err(_) => push_token(&mut tokens, &text),
+        for request in &seed.requests {
+            push_token(&mut tokens, &request.method);
+            push_token(&mut tokens, &request.path);
+            for (key, value) in request
+                .query
+                .iter()
+                .chain(&request.headers)
+                .chain(&request.cookies)
+            {
+                push_token(&mut tokens, key);
+                push_token(&mut tokens, &String::from_utf8_lossy(value));
+            }
+            collect_json_tokens(&request.body, &mut tokens);
+            if let Some(key) = &request.operation_key {
+                push_token(&mut tokens, key);
+            }
+            if let Some(raw) = &request.body_override {
+                let text = String::from_utf8_lossy(raw);
+                match serde_json::from_str::<serde_json::Value>(&text) {
+                    Ok(value) => collect_json_value_tokens(&value, &mut tokens),
+                    Err(_) => push_token(&mut tokens, &text),
+                }
             }
         }
     }
@@ -593,14 +775,78 @@ fn collect_json_value_tokens(value: &serde_json::Value, tokens: &mut Vec<String>
     }
 }
 
+pub fn input_from_json_prefix(text: &str) -> Result<HttpInput, String> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let value = serde_json::Value::deserialize(&mut deserializer)
+        .map_err(|err| format!("invalid JSON: {err}"))?;
+    input_from_json_value(value)
+}
+
 fn parse_seed_json(text: &str) -> Result<HttpInput, String> {
     let value: serde_json::Value =
         serde_json::from_str(text).map_err(|err| format!("invalid JSON: {err}"))?;
+    input_from_json_value(value)
+}
+
+fn input_from_json_value(value: serde_json::Value) -> Result<HttpInput, String> {
     let object = value
         .as_object()
         .ok_or_else(|| "seed must be a JSON object".to_string())?;
+    let input = if object.contains_key("requests") {
+        parse_input_object(object)?
+    } else {
+        let request = parse_request_object(object, &["exec_limit", "redqueen", "coverage_dump"])?;
+        HttpInput {
+            requests: vec![request],
+            exec_limit: optional_u32(object, "exec_limit")?.unwrap_or(0),
+            redqueen: optional_bool(object, "redqueen")?.unwrap_or(false),
+            coverage_dump: optional_bool(object, "coverage_dump")?.unwrap_or(false),
+        }
+    };
+    if input.requests.is_empty() {
+        return Err("requests must contain at least one request".to_string());
+    }
+    if input.nyx_payload().len() > NYX_INPUT_BUFFER_SIZE {
+        return Err(format!("payload exceeds {NYX_INPUT_BUFFER_SIZE} bytes"));
+    }
+    Ok(input)
+}
+
+fn parse_input_object(
+    object: &serde_json::Map<String, serde_json::Value>,
+) -> Result<HttpInput, String> {
     for key in object.keys() {
-        if !SEED_FIELDS.contains(&key.as_str()) {
+        if !INPUT_FIELDS.contains(&key.as_str()) {
+            return Err(format!("unknown field {key}"));
+        }
+    }
+    let Some(items) = object.get("requests").and_then(|value| value.as_array()) else {
+        return Err("requests must be an array".to_string());
+    };
+    if items.is_empty() {
+        return Err("requests must contain at least one request".to_string());
+    }
+    let mut requests = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let request = item
+            .as_object()
+            .ok_or_else(|| format!("requests[{index}] must be an object"))?;
+        requests.push(parse_request_object(request, &[])?);
+    }
+    Ok(HttpInput {
+        requests,
+        exec_limit: optional_u32(object, "exec_limit")?.unwrap_or(0),
+        redqueen: optional_bool(object, "redqueen")?.unwrap_or(false),
+        coverage_dump: optional_bool(object, "coverage_dump")?.unwrap_or(false),
+    })
+}
+
+fn parse_request_object(
+    object: &serde_json::Map<String, serde_json::Value>,
+    also_allowed: &[&str],
+) -> Result<HttpRequest, String> {
+    for key in object.keys() {
+        if !REQUEST_FIELDS.contains(&key.as_str()) && !also_allowed.contains(&key.as_str()) {
             return Err(format!("unknown field {key}"));
         }
     }
@@ -630,7 +876,7 @@ fn parse_seed_json(text: &str) -> Result<HttpInput, String> {
         _ => Some(format!("{method} {path}")),
     };
 
-    let input = HttpInput {
+    Ok(HttpRequest {
         method,
         path,
         query,
@@ -640,14 +886,7 @@ fn parse_seed_json(text: &str) -> Result<HttpInput, String> {
         body_override,
         operation_key,
         pin_route: optional_bool(object, "pin_route")?.unwrap_or(true),
-        exec_limit: optional_u32(object, "exec_limit")?.unwrap_or(0),
-        redqueen: optional_bool(object, "redqueen")?.unwrap_or(false),
-        coverage_dump: optional_bool(object, "coverage_dump")?.unwrap_or(false),
-    };
-    if input.nyx_payload().len() > NYX_INPUT_BUFFER_SIZE {
-        return Err(format!("payload exceeds {NYX_INPUT_BUFFER_SIZE} bytes"));
-    }
-    Ok(input)
+    })
 }
 
 fn required_string(
@@ -758,7 +997,7 @@ mod tests {
     #[test]
     fn batch_seed_contains_requests() {
         let seed = HttpInput::batch_seed();
-        let body = String::from_utf8(seed.body_bytes()).unwrap();
+        let body = String::from_utf8(seed.requests[0].body_bytes()).unwrap();
         assert!(body.contains("\"requests\""));
         assert!(body.contains("seed"));
     }
@@ -790,23 +1029,26 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
 
         assert_eq!(seeds.len(), 2);
-        assert_eq!(seeds[0].method, "GET");
-        assert_eq!(seeds[0].path, "/wp-json/wp/v2/posts");
-        assert_eq!(seeds[0].body, JsonValue::Null);
-        assert!(!seeds[0].pin_route);
+        assert_eq!(seeds[0].requests[0].method, "GET");
+        assert_eq!(seeds[0].requests[0].path, "/wp-json/wp/v2/posts");
+        assert_eq!(seeds[0].requests[0].body, JsonValue::Null);
+        assert!(!seeds[0].requests[0].pin_route);
         assert_eq!(seeds[0].exec_limit, 3);
         assert_eq!(
-            seeds[0].operation_key.as_deref(),
+            seeds[0].requests[0].operation_key.as_deref(),
             Some("GET /wp-json/wp/v2/posts")
         );
-        assert_eq!(seeds[1].method, "POST");
-        assert_eq!(seeds[1].query, vec![("preview".to_string(), b"1".to_vec())]);
+        assert_eq!(seeds[1].requests[0].method, "POST");
         assert_eq!(
-            seeds[1].headers,
+            seeds[1].requests[0].query,
+            vec![("preview".to_string(), b"1".to_vec())]
+        );
+        assert_eq!(
+            seeds[1].requests[0].headers,
             vec![("X-Test".to_string(), b"yes".to_vec())]
         );
-        assert!(seeds[1].pin_route);
-        let body = String::from_utf8(seeds[1].body_bytes()).unwrap();
+        assert!(seeds[1].requests[0].pin_route);
+        let body = String::from_utf8(seeds[1].requests[0].body_bytes()).unwrap();
         assert!(body.contains("\"title\":\"seed\""));
 
         let tokens = dictionary_tokens(&seeds);
@@ -888,25 +1130,31 @@ mod tests {
 
         let text = std::fs::read_to_string(dir.join("case.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-        assert_eq!(value["method"], "POST");
-        assert_eq!(value["path"], "/wp-json/batch/v1");
-        assert_eq!(value["body"]["validation"], "normal");
-        assert_eq!(value["body"]["requests"][0]["path"], "/wp/v2/posts");
-        assert_eq!(value["body"]["requests"][0]["body"]["title"], "seed");
-        assert!(value["body_override"].is_null());
+        assert_eq!(value["requests"][0]["method"], "POST");
+        assert_eq!(value["requests"][0]["path"], "/wp-json/batch/v1");
+        assert_eq!(value["requests"][0]["body"]["validation"], "normal");
+        assert_eq!(
+            value["requests"][0]["body"]["requests"][0]["path"],
+            "/wp/v2/posts"
+        );
+        assert_eq!(
+            value["requests"][0]["body"]["requests"][0]["body"]["title"],
+            "seed"
+        );
+        assert!(value["requests"][0]["body_override"].is_null());
 
         let mut smashed = seed;
-        smashed.body_override = Some(b"not json".to_vec());
-        smashed.headers = vec![
+        smashed.requests[0].body_override = Some(b"not json".to_vec());
+        smashed.requests[0].headers = vec![
             ("X-Test".to_string(), b"a".to_vec()),
             ("X-Test".to_string(), b"b".to_vec()),
         ];
         smashed.to_file(dir.join("smashed")).unwrap();
         let smashed_text = std::fs::read_to_string(dir.join("smashed.json")).unwrap();
         let smashed_value: serde_json::Value = serde_json::from_str(&smashed_text).unwrap();
-        assert_eq!(smashed_value["body_override"], "not json");
+        assert_eq!(smashed_value["requests"][0]["body_override"], "not json");
         assert_eq!(
-            smashed_value["headers"],
+            smashed_value["requests"][0]["headers"],
             serde_json::json!([["X-Test", "a"], ["X-Test", "b"]])
         );
 
@@ -925,9 +1173,41 @@ mod tests {
             parsed["requests"][0]["SCRIPT_FILENAME"],
             "/var/www/html/index.php"
         );
+        assert_eq!(parsed["requests"][0]["REQUEST_METHOD"], "POST");
+        assert_eq!(parsed["requests"][0]["REQUEST_URI"], "/wp-json/batch/v1");
+        assert!(parsed["requests"][0]["CONTENT_TYPE"].is_string());
         let post_data = parsed["requests"][0]["POST_DATA"].as_str().unwrap();
         assert!(post_data.contains("\"requests\""));
         assert!(post_data.contains("seed"));
+    }
+
+    #[test]
+    fn nyx_payload_sends_every_request_in_order() {
+        let mut input = HttpInput::batch_seed();
+        input.requests.push(HttpRequest {
+            method: "GET".to_string(),
+            path: "/WebGoat/start.mvc".to_string(),
+            query: Vec::new(),
+            headers: Vec::new(),
+            cookies: Vec::new(),
+            body: JsonValue::Null,
+            body_override: None,
+            operation_key: None,
+            pin_route: true,
+        });
+        let payload = input.nyx_payload();
+        let parsed: serde_json::Value =
+            serde_json::from_slice(&payload[..payload.len() - 1]).unwrap();
+        assert_eq!(parsed["requests"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["requests"][0]["REQUEST_METHOD"], "POST");
+        assert_eq!(parsed["requests"][1]["REQUEST_METHOD"], "GET");
+        assert_eq!(parsed["requests"][1]["REQUEST_URI"], "/WebGoat/start.mvc");
+
+        let text = r#"{"requests":[{"method":"POST","path":"/a","body":null},{"method":"GET","path":"/b","body":{}}],"exec_limit":4}"#;
+        let loaded = parse_seed_json(text).unwrap();
+        assert_eq!(loaded.requests.len(), 2);
+        assert_eq!(loaded.requests[1].path, "/b");
+        assert_eq!(loaded.exec_limit, 4);
     }
 
     #[test]
@@ -965,5 +1245,56 @@ mod tests {
                 JsonValue::Bool(true)
             ]))
         );
+    }
+
+    #[test]
+    fn session_cookie_is_written_into_seed_files_and_inputs() {
+        let dir =
+            std::env::temp_dir().join(format!("atropos-session-cookie-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("sql-injection.json"),
+            r#"{"method":"POST","path":"/WebGoat/SqlInjection/attack5","query":{"query":"John"},"cookies":[["JSESSIONID","stale"]],"body":null,"pin_route":true}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("plain.json"),
+            r#"{"method":"GET","path":"/WebGoat/start.mvc","body":null}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("bad.json"), r#"{"method":"POST"}"#).unwrap();
+
+        let updated = write_session_cookie(&dir, "fresh-id").unwrap();
+        assert_eq!(updated, 2);
+        let seeds = load_seed_directory(&dir).unwrap();
+        assert_eq!(seeds[0].requests[0].path, "/WebGoat/start.mvc");
+        assert_eq!(
+            seeds[0].requests[0].cookies,
+            vec![("JSESSIONID".to_string(), b"fresh-id".to_vec())]
+        );
+        assert_eq!(seeds[1].requests[0].cookies.len(), 1);
+        assert_eq!(seeds[1].requests[0].cookies[0].1, b"fresh-id");
+        assert!(std::fs::read_to_string(dir.join("bad.json"))
+            .unwrap()
+            .contains(r#"{"method":"POST"}"#));
+
+        let mut input = seeds[1].clone();
+        input.requests[0]
+            .cookies
+            .push(("theme".to_string(), b"dark".to_vec()));
+        set_jsessionid(&mut input, "newer");
+        assert_eq!(
+            input.requests[0].cookie_header(),
+            "theme=dark; JSESSIONID=newer"
+        );
+
+        let dump = dir.join("dump");
+        std::fs::create_dir_all(&dump).unwrap();
+        std::fs::write(dump.join("session-cookie.txt"), "fresh-id\n").unwrap();
+        assert_eq!(read_session_cookie(&dump).as_deref(), Some("fresh-id"));
+        std::fs::write(dump.join("session-cookie.txt"), "bad value\n").unwrap();
+        assert_eq!(read_session_cookie(&dump), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

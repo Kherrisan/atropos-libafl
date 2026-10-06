@@ -5,7 +5,11 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 ORIGINAL_CWD="$(pwd)"
 NYX_DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}"
-NYX_SHARE="$NYX_DATA_DIR/phase-run/share-oracle"
+if [[ "${ATROPOS_NYX_TARGET:-}" == spring ]]; then
+	NYX_SHARE="$NYX_DATA_DIR/spring/share"
+else
+	NYX_SHARE="$NYX_DATA_DIR/phase-run/share-oracle"
+fi
 args=("$@")
 
 abs_one() {

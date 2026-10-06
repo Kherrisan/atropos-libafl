@@ -1,0 +1,36 @@
+--- a/src/main/java/instrumentor/Hook.kt
++++ b/src/main/java/instrumentor/Hook.kt
+@@ -112,5 +112,33 @@
+                 }
+             }
+         }
++
++        @JvmStatic
++        fun createUnverified(
++            hookClassName: String,
++            hookMethodName: String,
++            hookMethodDescriptor: String,
++            type: HookType,
++            targetClassName: String,
++            targetMethodName: String,
++            targetMethodDescriptor: String,
++            additional: List<String>,
++        ): Hook {
++            val targetReturnTypeDescriptor = targetMethodDescriptor.takeIf { it.isNotBlank() }?.let { extractReturnTypeDescriptor(it) }
++            return Hook(
++                targetClassName = targetClassName,
++                hookType = type,
++                targetMethodName = targetMethodName,
++                targetMethodDescriptor = targetMethodDescriptor.takeIf { it.isNotBlank() },
++                additionalClassesToHook = additional,
++                targetInternalClassName = targetClassName.replace('.', '/'),
++                targetReturnTypeDescriptor = targetReturnTypeDescriptor,
++                targetWrappedReturnTypeDescriptor = targetReturnTypeDescriptor?.let { getWrapperTypeDescriptor(it) },
++                hookClassName = hookClassName,
++                hookInternalClassName = hookClassName.replace('.', '/'),
++                hookMethodName = hookMethodName,
++                hookMethodDescriptor = hookMethodDescriptor,
++            )
++        }
+     }
+ }
