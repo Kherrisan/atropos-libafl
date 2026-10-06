@@ -2,15 +2,30 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-SPRING_ROOT="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}/spring"
+FUZZER_OUTPUT=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--fuzzer-output)
+		FUZZER_OUTPUT="${2:?--fuzzer-output needs a directory}"
+		shift 2
+		;;
+	*)
+		printf 'unknown argument: %s\n' "$1" >&2
+		exit 1
+		;;
+	esac
+done
+if [[ -z "$FUZZER_OUTPUT" ]]; then
+	printf 'usage: create-nyx-spring-vm.sh --fuzzer-output DIR\n' >&2
+	exit 1
+fi
+SPRING_ROOT="$FUZZER_OUTPUT/spring"
 if [[ ! -f "$SPRING_ROOT/bundle/guest-bundle.tar.gz" ]]; then
 	printf 'Spring guest bundle is missing; run scripts/package-nyx-spring-guest.sh\n' >&2
 	exit 1
 fi
 
-ATROPOS_NYX_DATA_DIR="$SPRING_ROOT" \
-ATROPOS_NYX_GUEST_BUNDLE="$SPRING_ROOT/bundle/guest-bundle.tar.gz" \
-	"$SCRIPT_DIR/create-nyx-vm.sh"
+"$SCRIPT_DIR/create-nyx-vm.sh" --fuzzer-output "$SPRING_ROOT"
 
 serial="$SPRING_ROOT/vm/preimage-serial.log"
 seed_dir="$SPRING_ROOT/guest/seeds"

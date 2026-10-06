@@ -4,9 +4,25 @@ export LC_ALL=C
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-LEGACY_ROOT="${ATROPOS_LEGACY_ROOT:-$(cd -- "$REPO_ROOT/../atropos-legacy" && pwd)}"
-SPRINGFUZZ_ROOT="${ATROPOS_SPRINGFUZZ_ROOT:-$REPO_ROOT/third-party/SpringFuzz}"
-DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}/spring"
+FUZZER_OUTPUT=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--fuzzer-output)
+		FUZZER_OUTPUT="${2:?--fuzzer-output needs a directory}"
+		shift 2
+		;;
+	*)
+		printf 'unknown argument: %s\n' "$1" >&2
+		exit 1
+		;;
+	esac
+done
+if [[ -z "$FUZZER_OUTPUT" ]]; then
+	printf 'usage: build-nyx-spring.sh --fuzzer-output DIR\n' >&2
+	exit 1
+fi
+SPRINGFUZZ_ROOT="$REPO_ROOT/third-party/SpringFuzz"
+DATA_DIR="$FUZZER_OUTPUT/spring"
 GUEST_DIR="$DATA_DIR/guest"
 BUILD_ROOT="${ATROPOS_SPRING_BUILD_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/atropos-spring.XXXXXX")}"
 MAVEN_VERSION="${ATROPOS_MAVEN_VERSION:-3.9.9}"
@@ -65,8 +81,8 @@ if [[ ! -f "$SPRINGFUZZ_ROOT/pom.xml" ]]; then
 	printf 'SpringFuzz sources are missing at %s\n' "$SPRINGFUZZ_ROOT" >&2
 	exit 1
 fi
-if [[ ! -d "$LEGACY_ROOT/fuzzer" ]]; then
-	printf 'Legacy Nyx headers are missing at %s\n' "$LEGACY_ROOT/fuzzer" >&2
+if [[ ! -f "$REPO_ROOT/guest/common/nyx.h" ]]; then
+	printf 'Nyx headers are missing at %s\n' "$REPO_ROOT/guest/common/nyx.h" >&2
 	exit 1
 fi
 for dependency in curl python3 gcc unzip; do
@@ -330,16 +346,15 @@ if [[ ! -x "$GUEST_DIR/jre/bin/java" ]]; then
 fi
 
 printf 'Building the Spring Nyx agent\n'
-"$SCRIPT_DIR/with-nyx-build-deps.sh" bash -s -- "$BUILD_ROOT" "$GUEST_DIR" "$LEGACY_ROOT" "$REPO_ROOT" <<'BASH'
+"$SCRIPT_DIR/with-nyx-build-deps.sh" bash -s -- "$BUILD_ROOT" "$GUEST_DIR" "$REPO_ROOT" <<'BASH'
 set -euo pipefail
 build_root="$1"
 guest_dir="$2"
-legacy_root="$3"
-repo_root="$4"
+repo_root="$3"
 agent_source="$build_root/agent-src"
 mkdir -p "$agent_source"
 cp -- "$repo_root/guest/spring/spring_agent.nim" "$repo_root/guest/common/nyx_dump_file.c" \
-	"$legacy_root/fuzzer/nyx.c" "$legacy_root/fuzzer/nyx.h" "$agent_source/"
+	"$repo_root/guest/common/nyx.c" "$repo_root/guest/common/nyx.h" "$agent_source/"
 python3 - "$agent_source/nyx.c" <<'PYTHON'
 from pathlib import Path
 import sys

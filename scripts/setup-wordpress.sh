@@ -3,8 +3,30 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-WP_ROOT="$(cd -- "${ATROPOS_WORDPRESS_ROOT:-$REPO_ROOT/../wordpress}" && pwd)"
-PHP_PREFIX="${ATROPOS_PHP_PREFIX:-${ATROPOS_NYX_PHP_PREFIX:-$HOME/.local/opt/atropos-libafl-nyx-php}}"
+SRC=""
+PHP_OUTPUT=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--src)
+		SRC="${2:?--src needs a directory}"
+		shift 2
+		;;
+	--php-output)
+		PHP_OUTPUT="${2:?--php-output needs a directory}"
+		shift 2
+		;;
+	*)
+		printf 'unknown argument: %s\n' "$1" >&2
+		exit 1
+		;;
+	esac
+done
+if [[ -z "$SRC" || -z "$PHP_OUTPUT" ]]; then
+	printf 'usage: setup-wordpress.sh --src DIR --php-output DIR\n' >&2
+	exit 1
+fi
+WP_ROOT="$(cd -- "$SRC" && pwd)"
+PHP_PREFIX="$PHP_OUTPUT/prefix"
 CONFIG_DIR="$HOME/.config/atropos-libafl"
 SECRET_FILE="$CONFIG_DIR/wordpress-db.env"
 DB_DIR="${ATROPOS_MARIADB_DATA_DIR:-$HOME/.local/share/atropos-libafl/mariadb}"
@@ -19,7 +41,7 @@ if [[ ! -x "$PHP_PREFIX/bin/php" ]]; then
 	exit 1
 fi
 if [[ ! -f "$WP_ROOT/wp-settings.php" ]]; then
-	printf 'WordPress source not found under %s; set ATROPOS_WORDPRESS_ROOT\n' "$WP_ROOT" >&2
+	printf 'WordPress source not found under %s; pass --src\n' "$WP_ROOT" >&2
 	exit 1
 fi
 
@@ -169,16 +191,13 @@ EOF
 	fi
 fi
 
-export ATROPOS_WORDPRESS_ROOT="$WP_ROOT"
-ATROPOS_PHP_PREFIX="$PHP_PREFIX" ATROPOS_WORDPRESS_ROOT="$WP_ROOT" \
-ATROPOS_WP_ADMIN_PASSWORD="$ATROPOS_WP_ADMIN_PASSWORD" \
-	"$PHP_PREFIX/bin/php" -r '
+"$PHP_PREFIX/bin/php" -r '
 define("WP_INSTALLING", true);
-require getenv("ATROPOS_WORDPRESS_ROOT") . "/wp-load.php";
+require $argv[1] . "/wp-load.php";
 require ABSPATH . "wp-admin/includes/upgrade.php";
 if (function_exists("is_blog_installed") && is_blog_installed()) { exit(0); }
-wp_install("Atropos local fuzz target", "admin", "admin@atropos.invalid", false, "", getenv("ATROPOS_WP_ADMIN_PASSWORD"));
-' >/dev/null
+wp_install("Atropos local fuzz target", "admin", "admin@atropos.invalid", false, "", $argv[2]);
+' "$WP_ROOT" "$ATROPOS_WP_ADMIN_PASSWORD" >/dev/null
 
 printf 'WordPress database is ready at 127.0.0.1:33060.\n'
 printf 'MariaDB data: %s\n' "$DB_DIR"

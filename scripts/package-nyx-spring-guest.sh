@@ -4,14 +4,30 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-LEGACY_ROOT="${ATROPOS_LEGACY_ROOT:-$(cd -- "$REPO_ROOT/../atropos-legacy" && pwd)}"
-DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}/spring"
+FUZZER_OUTPUT=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--fuzzer-output)
+		FUZZER_OUTPUT="${2:?--fuzzer-output needs a directory}"
+		shift 2
+		;;
+	*)
+		printf 'unknown argument: %s\n' "$1" >&2
+		exit 1
+		;;
+	esac
+done
+if [[ -z "$FUZZER_OUTPUT" ]]; then
+	printf 'usage: package-nyx-spring-guest.sh --fuzzer-output DIR\n' >&2
+	exit 1
+fi
+DATA_DIR="$FUZZER_OUTPUT/spring"
 GUEST_DIR="$DATA_DIR/guest"
 BUNDLE_DIR="$DATA_DIR/bundle"
 
 for path in "$GUEST_DIR/spring-runtime" "$GUEST_DIR/webgoat.jar" "$GUEST_DIR/springfuzz-agent.jar" "$GUEST_DIR/springfuzz-hooks.jar" \
 	"$GUEST_DIR/atropos_spring_agent" "$GUEST_DIR/lib/libatropos_nyx_bitmap.so" "$GUEST_DIR/jre/bin/java" \
-	"$GUEST_DIR/openapi.json" "$LEGACY_ROOT/fuzzer/nyx.h"; do
+	"$GUEST_DIR/openapi.json" "$REPO_ROOT/guest/common/nyx.h"; do
 	if [[ ! -e "$path" ]]; then
 		printf 'Required Spring guest input is missing: %s\n' "$path" >&2
 		exit 1
@@ -54,7 +70,7 @@ int main(int argc, char **argv) {
 	return 0;
 }
 C
-gcc -static -O2 -I"$LEGACY_ROOT/fuzzer" -o "$BUNDLE_DIR/atropos-nyx-preimage" "$BUNDLE_DIR/nyx-preimage.c"
+gcc -static -O2 -I"$REPO_ROOT/guest/common" -o "$BUNDLE_DIR/atropos-nyx-preimage" "$BUNDLE_DIR/nyx-preimage.c"
 rm -f -- "$BUNDLE_DIR/nyx-preimage.c"
 chmod 0755 "$BUNDLE_DIR/atropos-nyx-preimage" "$BUNDLE_DIR/atropos_spring_agent"
 

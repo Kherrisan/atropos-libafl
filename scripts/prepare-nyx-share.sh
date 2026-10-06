@@ -3,13 +3,29 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}"
-SHARE_DIR="${ATROPOS_NYX_SHARE:-$DATA_DIR/share}"
-WORKDIR="${ATROPOS_NYX_WORKDIR:-$DATA_DIR/workdir}"
-VM_DIR="${ATROPOS_NYX_VM_DIR:-$DATA_DIR/vm}"
-QEMU_NYX="${ATROPOS_NYX_QEMU:-$REPO_ROOT/target/nyx/QEMU-Nyx/x86_64-softmmu/qemu-system-x86_64}"
-VM_IMAGE="${ATROPOS_NYX_VM_IMAGE:-$VM_DIR/atropos-nyx.qcow2}"
-PRESNAPSHOT="${ATROPOS_NYX_PRESNAPSHOT:-$VM_DIR/presnapshot}"
+DATA_DIR=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--fuzzer-output)
+		DATA_DIR="${2:?--fuzzer-output needs a directory}"
+		shift 2
+		;;
+	*)
+		printf 'unknown argument: %s\n' "$1" >&2
+		exit 1
+		;;
+	esac
+done
+if [[ -z "$DATA_DIR" ]]; then
+	printf 'usage: prepare-nyx-share.sh --fuzzer-output DIR\n' >&2
+	exit 1
+fi
+SHARE_DIR="$DATA_DIR/share"
+WORKDIR="$DATA_DIR/workdir"
+VM_DIR="$DATA_DIR/vm"
+QEMU_NYX="$REPO_ROOT/target/nyx/QEMU-Nyx/x86_64-softmmu/qemu-system-x86_64"
+VM_IMAGE="$VM_DIR/atropos-nyx.qcow2"
+PRESNAPSHOT="$VM_DIR/presnapshot"
 
 for path in "$QEMU_NYX" "$VM_IMAGE" "$PRESNAPSHOT"; do
 	if [[ ! -e "$path" ]]; then

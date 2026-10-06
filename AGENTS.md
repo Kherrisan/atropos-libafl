@@ -1,6 +1,6 @@
 # Repository Guidelines
 
-**Nyx paths:** Do not hard-code machine-specific absolute host paths in Nyx scripts or runtime defaults. Derive paths from the script or repository location, `$HOME` or an `ATROPOS_NYX_*` setting.
+**Nyx paths:** Do not hard-code machine-specific absolute host paths in Nyx scripts or runtime defaults. Take paths from `scripts/atropos.sh` flags, or derive them from the script location and `$HOME`.
 
 ## Project Structure
 
@@ -16,8 +16,8 @@
 - `cargo build --profile nyx` builds the optimized Nyx binary profile.
 - `cargo fmt --check` checks Rust formatting; run `cargo fmt` to apply it.
 - `cargo test` runs the Rust unit tests embedded in modules under `src/`.
-- `scripts/build-nyx-fuzzer.sh` builds the Nyx-enabled LibAFL/QEMU toolchain. `scripts/build-nyx-php.sh` builds PHP/PCOV and the guest runtime; follow the container setup in `README.md`.
-- After preparing the guest and KVM, use `ATROPOS_NYX_ITERS=20 scripts/run-fuzzer.sh` for a short integration smoke run. The script creates `output/<YYYYMMDD-HHMM>-<4 hex>/`, tees stdout and stderr to `fuzzer.log` there, and starts the fuzzer with that directory as its working directory. Default corpus and objective paths are therefore `corpus/` and `objectives/` inside the run directory. Coverage reports and `llm/queue.json` are written in the same directory. There is no per-execution trace file. Relative `--corpus-dir`, `--objectives-dir`, `--seed-dir`, `--nyx-share`, `--nyx-workdir`, `--mutation-dict`, `--bug-trigger`, and `--openapi` values are resolved from the directory where the script was invoked, before that working-directory change. Nyx images, snapshots, and the QEMU work directory stay under the configured Nyx data directory.
+- `scripts/atropos.sh build-fuzzer` builds the Nyx-enabled LibAFL/QEMU toolchain. `scripts/atropos.sh build-php` builds PHP/PCOV and the guest runtime; follow the container setup in `README.md`.
+- After preparing the guest and KVM, use `ATROPOS_NYX_ITERS=20 scripts/atropos.sh run --fuzzer-output ~/.nyx` for a short integration smoke run. The script creates `output/<YYYYMMDD-HHMM>-<4 hex>/`, tees stdout and stderr to `fuzzer.log` there, and starts the fuzzer with that directory as its working directory. Default corpus and objective paths are therefore `corpus/` and `objectives/` inside the run directory. Coverage reports and `llm/queue.json` are written in the same directory. There is no per-execution trace file. Relative `--corpus-dir`, `--objectives-dir`, `--seed-dir`, `--nyx-share`, `--nyx-workdir`, `--mutation-dict`, `--bug-trigger`, and `--openapi` values are resolved from the directory where the script was invoked, before that working-directory change. Nyx images, snapshots, and the QEMU work directory stay under the configured Nyx data directory.
 
 ## Coding Style
 
@@ -33,4 +33,4 @@ Recent commits use short imperative summaries (for example, “Add queue coverag
 
 ## Configuration and Secrets
 
-Read `README.md` before changing provisioning or runtime setup. Keep local database credentials and WordPress configuration out of the repository; use the documented `ATROPOS_*` variables and local Nyx data paths for machine-specific settings.
+Read `README.md` before changing provisioning or runtime setup. Keep local database credentials and WordPress configuration out of the repository; pass machine-specific paths with `scripts/atropos.sh` flags such as `--src`, `--php-output`, and `--fuzzer-output`.

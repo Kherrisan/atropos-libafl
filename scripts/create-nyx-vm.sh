@@ -9,20 +9,36 @@ if [[ "${ATROPOS_NYX_BUILD_SHELL:-0}" != 1 ]]; then
 	exec "$SCRIPT_DIR/with-nyx-build-deps.sh" "$0" "$@"
 fi
 
-DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}"
-VM_DIR="${ATROPOS_NYX_VM_DIR:-$DATA_DIR/vm}"
+DATA_DIR=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--fuzzer-output)
+		DATA_DIR="${2:?--fuzzer-output needs a directory}"
+		shift 2
+		;;
+	*)
+		printf 'unknown argument: %s\n' "$1" >&2
+		exit 1
+		;;
+	esac
+done
+if [[ -z "$DATA_DIR" ]]; then
+	printf 'usage: create-nyx-vm.sh --fuzzer-output DIR\n' >&2
+	exit 1
+fi
+VM_DIR="$DATA_DIR/vm"
 BASE_IMAGE="$VM_DIR/noble-server-cloudimg-amd64.img"
-VM_IMAGE="${ATROPOS_NYX_VM_IMAGE:-$VM_DIR/atropos-nyx.qcow2}"
-PAYLOAD_ISO="${ATROPOS_NYX_PAYLOAD_ISO:-$VM_DIR/atropos-payload.iso}"
-SEED_ISO="${ATROPOS_NYX_SEED_ISO:-$VM_DIR/cloud-init-seed.iso}"
-PAYLOAD_DIR="${ATROPOS_NYX_PAYLOAD_DIR:-$VM_DIR/payload}"
-BUNDLE="${ATROPOS_NYX_GUEST_BUNDLE:-$DATA_DIR/bundle/guest-bundle.tar.gz}"
-QEMU_NYX="${ATROPOS_NYX_QEMU:-$REPO_ROOT/target/nyx/QEMU-Nyx/x86_64-softmmu/qemu-system-x86_64}"
-QEMU_TCG="${ATROPOS_NYX_TCG_QEMU:-$(command -v qemu-system-x86_64 || true)}"
-DISK_SIZE_GB="${ATROPOS_NYX_DISK_GB:-32}"
-MEMORY_MB="${ATROPOS_NYX_MEMORY_MB:-8192}"
-CPU_COUNT="${ATROPOS_NYX_BOOT_CPUS:-1}"
-PREIMAGE="${ATROPOS_NYX_PRESNAPSHOT:-$VM_DIR/presnapshot}"
+VM_IMAGE="$VM_DIR/atropos-nyx.qcow2"
+PAYLOAD_ISO="$VM_DIR/atropos-payload.iso"
+SEED_ISO="$VM_DIR/cloud-init-seed.iso"
+PAYLOAD_DIR="$VM_DIR/payload"
+BUNDLE="$DATA_DIR/bundle/guest-bundle.tar.gz"
+QEMU_NYX="$REPO_ROOT/target/nyx/QEMU-Nyx/x86_64-softmmu/qemu-system-x86_64"
+QEMU_TCG="$(command -v qemu-system-x86_64 || true)"
+DISK_SIZE_GB=32
+MEMORY_MB=8192
+CPU_COUNT=1
+PREIMAGE="$VM_DIR/presnapshot"
 BUNDLE_CHANGED=0
 
 for command in curl sha256sum awk qemu-img cloud-localds genisoimage timeout; do
@@ -209,11 +225,10 @@ else
 		printf 'Nyx pre-snapshot creation failed (QEMU status %s). See %s\n' "$QEMU_STATUS" "$PREIMAGE_LOG" >&2
 		exit 1
 	fi
+	"$SCRIPT_DIR/punch-nyx-snapshot.sh" "$PREIMAGE/fast_snapshot.mem_dump"
 	touch "$VM_DIR/preimage-complete"
 	chmod 600 "$VM_DIR/preimage-complete"
 fi
 
-ATROPOS_NYX_VM_DIR="$VM_DIR" ATROPOS_NYX_QEMU="$QEMU_NYX" \
-	ATROPOS_NYX_VM_IMAGE="$VM_IMAGE" ATROPOS_NYX_PRESNAPSHOT="$PREIMAGE" \
-	ATROPOS_NYX_DATA_DIR="$DATA_DIR" "$SCRIPT_DIR/prepare-nyx-share.sh"
+"$SCRIPT_DIR/prepare-nyx-share.sh" --fuzzer-output "$DATA_DIR"
 printf '\nNyx VM and share configuration are ready. Run scripts/run-fuzzer.sh to start fuzzing.\n'

@@ -20,7 +20,6 @@ if [[ -f /root/.cargo/env ]]; then
 fi
 
 export ATROPOS_NYX_DATA_DIR="${ATROPOS_NYX_DATA_DIR:-/var/lib/atropos/nyx}"
-export ATROPOS_LEGACY_ROOT="${ATROPOS_LEGACY_ROOT:-/opt/atropos-legacy}"
 export ATROPOS_WORDPRESS_ROOT="${ATROPOS_WORDPRESS_ROOT:-/opt/wordpress}"
 export ATROPOS_NYX_CPU="${ATROPOS_NYX_CPU:-0}"
 export ATROPOS_NYX_VM_DIR="${ATROPOS_NYX_VM_DIR:-$ATROPOS_NYX_DATA_DIR/vm}"
@@ -45,7 +44,10 @@ start_mariadb() {
 	fi
 	# Bring up the database created by scripts/setup-wordpress.sh. systemd is
 	# not running in this container, so start mariadbd directly.
-	bash "$REPO_ROOT/scripts/setup-wordpress.sh"
+	bash "$REPO_ROOT/scripts/atropos.sh" setup-wordpress \
+		--src /opt/wordpress \
+		--php-output /var/lib/atropos/nyx/guest \
+		--fuzzer-output /var/lib/atropos/nyx
 }
 
 exec 9>"$ATROPOS_NYX_DATA_DIR/.provision.lock"
@@ -53,8 +55,12 @@ flock 9
 if ! snapshot_ready; then
 	printf 'Nyx guest image or pre-snapshot is missing; provisioning into %s\n' "$ATROPOS_NYX_DATA_DIR"
 	start_mariadb
-	bash "$REPO_ROOT/scripts/package-nyx-guest.sh"
-	bash "$REPO_ROOT/scripts/create-nyx-vm.sh"
+	bash "$REPO_ROOT/scripts/atropos.sh" package-guest \
+		--src /opt/wordpress \
+		--php-output /var/lib/atropos/nyx/guest \
+		--fuzzer-output /var/lib/atropos/nyx
+	bash "$REPO_ROOT/scripts/atropos.sh" create-vm \
+		--fuzzer-output /var/lib/atropos/nyx
 fi
 if ! snapshot_ready; then
 	printf 'error: provisioning finished but %s or %s is still missing\n' \
@@ -63,8 +69,9 @@ if ! snapshot_ready; then
 fi
 flock -u 9
 
-bash "$REPO_ROOT/scripts/prepare-nyx-share.sh"
-exec bash "$REPO_ROOT/scripts/run-fuzzer.sh" \
+exec bash "$REPO_ROOT/scripts/atropos.sh" run \
+	--fuzzer-output /var/lib/atropos/nyx \
+	-- \
 	--nyx-share "$ATROPOS_NYX_SHARE" \
 	--nyx-workdir "$ATROPOS_NYX_WORKDIR" \
 	"$@"

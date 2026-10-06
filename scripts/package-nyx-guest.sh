@@ -9,12 +9,36 @@ if [[ "${ATROPOS_NYX_BUILD_SHELL:-0}" != 1 ]]; then
 	exec "$SCRIPT_DIR/with-nyx-build-deps.sh" "$0" "$@"
 fi
 
-LEGACY_ROOT="${ATROPOS_LEGACY_ROOT:-$(cd -- "$REPO_ROOT/../atropos-legacy" && pwd)}"
-DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}"
-ARTIFACT_DIR="${ATROPOS_NYX_GUEST_ARTIFACTS:-$DATA_DIR/guest}"
-WP_ROOT="${ATROPOS_WORDPRESS_ROOT:-$REPO_ROOT/../wordpress}"
-WP_ROOT="$(realpath -- "$WP_ROOT")"
-SECRET_FILE="${ATROPOS_WORDPRESS_SECRET_FILE:-$HOME/.config/atropos-libafl/wordpress-db.env}"
+DATA_DIR=""
+PHP_OUTPUT=""
+SRC=""
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--fuzzer-output)
+		DATA_DIR="${2:?--fuzzer-output needs a directory}"
+		shift 2
+		;;
+	--php-output)
+		PHP_OUTPUT="${2:?--php-output needs a directory}"
+		shift 2
+		;;
+	--src)
+		SRC="${2:?--src needs a directory}"
+		shift 2
+		;;
+	*)
+		printf 'unknown argument: %s\n' "$1" >&2
+		exit 1
+		;;
+	esac
+done
+if [[ -z "$DATA_DIR" || -z "$PHP_OUTPUT" || -z "$SRC" ]]; then
+	printf 'usage: package-nyx-guest.sh --src DIR --php-output DIR --fuzzer-output DIR\n' >&2
+	exit 1
+fi
+ARTIFACT_DIR="$PHP_OUTPUT"
+WP_ROOT="$(realpath -- "$SRC")"
+SECRET_FILE="$HOME/.config/atropos-libafl/wordpress-db.env"
 BUNDLE_DIR="$DATA_DIR/bundle"
 
 for path in "$ARTIFACT_DIR/nyx-php-runtime.tar.gz" "$ARTIFACT_DIR/php-code-coverage-runtime" \
@@ -22,7 +46,7 @@ for path in "$ARTIFACT_DIR/nyx-php-runtime.tar.gz" "$ARTIFACT_DIR/php-code-cover
 	"$ARTIFACT_DIR/php-cli" "$ARTIFACT_DIR/atropos_shm.so" "$ARTIFACT_DIR/atropos-nyx-bootstrap.php" \
 	"$ARTIFACT_DIR/atropos-flush-permalinks.php" \
 	"$WP_ROOT/index.php" "$WP_ROOT/wp-config.php" "$SECRET_FILE" \
-	"$LEGACY_ROOT/fuzzer/nyx.h" "$SCRIPT_DIR/nyx-guest-launch.sh"; do
+	"$REPO_ROOT/guest/common/nyx.h" "$SCRIPT_DIR/nyx-guest-launch.sh"; do
 	if [[ ! -e "$path" ]]; then
 		printf 'Required Nyx guest input is missing: %s\n' "$path" >&2
 		exit 1
@@ -117,7 +141,7 @@ HOST_CC=(/usr/bin/gcc -B/usr/bin/ -fno-lto)
 if [[ -n "${ATROPOS_HOST_CC:-}" ]]; then
 	read -r -a HOST_CC <<< "$ATROPOS_HOST_CC"
 fi
-"${HOST_CC[@]}" -static -O2 -I"$LEGACY_ROOT/fuzzer" \
+"${HOST_CC[@]}" -static -O2 -I"$REPO_ROOT/guest/common" \
 	-o "$BUNDLE_DIR/atropos-nyx-preimage" "$BUNDLE_DIR/nyx-preimage.c"
 rm -f -- "$BUNDLE_DIR/nyx-preimage.c"
 chmod 0755 "$BUNDLE_DIR/atropos-nyx-preimage"

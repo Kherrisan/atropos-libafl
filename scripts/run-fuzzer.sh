@@ -4,13 +4,39 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 ORIGINAL_CWD="$(pwd)"
-NYX_DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}"
-if [[ "${ATROPOS_NYX_TARGET:-}" == spring ]]; then
+NYX_DATA_DIR=""
+TARGET="php"
+CPU_SET=""
+args=()
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--fuzzer-output)
+		NYX_DATA_DIR="${2:?--fuzzer-output needs a directory}"
+		shift 2
+		;;
+	--target)
+		TARGET="${2:?--target needs php or spring}"
+		shift 2
+		;;
+	--cpu-set)
+		CPU_SET="${2:?--cpu-set needs a CPU list}"
+		shift 2
+		;;
+	*)
+		args+=("$1")
+		shift
+		;;
+	esac
+done
+if [[ -z "$NYX_DATA_DIR" ]]; then
+	printf 'usage: run-fuzzer.sh --fuzzer-output DIR [--target php|spring] [fuzzer flags]\n' >&2
+	exit 1
+fi
+if [[ "$TARGET" == spring ]]; then
 	NYX_SHARE="$NYX_DATA_DIR/spring/share"
 else
 	NYX_SHARE="$NYX_DATA_DIR/phase-run/share-oracle"
 fi
-args=("$@")
 
 abs_one() {
 	local path="$1"
@@ -145,6 +171,6 @@ printf 'fuzzer log: %s\n' "$LOG_FILE"
 cd "$RUN_DIR"
 # These cores were running at 2100 MHz. QEMU otherwise inherits 0-63 and can
 # stay on an 800 MHz core for a whole run.
-CPUSET="${ATROPOS_NYX_CPUSET:-2-5,7,9,12-14,16-20,22-28,32,35,37-39,41-48,51-60,63}"
+CPUSET="${CPU_SET:-2-5,7,9,12-14,16-20,22-28,32,35,37-39,41-48,51-60,63}"
 printf 'fuzzer cpu set: %s\n' "$CPUSET"
 taskset -c "$CPUSET" "$REPO_ROOT/target/nyx/atropos-libafl" "${args[@]}"

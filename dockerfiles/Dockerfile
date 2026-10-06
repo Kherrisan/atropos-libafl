@@ -1,7 +1,7 @@
 # Atropos LibAFL Nyx fuzzing image.
 #
-# Build from the directory that contains atropos-libafl, atropos-legacy, and
-# wordpress (Docker cannot COPY paths outside the build context):
+# Build from the directory that contains atropos-libafl and wordpress
+# (Docker cannot COPY paths outside the build context):
 #
 #   docker build -f atropos-libafl/dockerfiles/Dockerfile -t atropos-libafl .
 #
@@ -30,7 +30,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C \
     ATROPOS_NYX_DATA_DIR=/var/lib/atropos/nyx \
-    ATROPOS_LEGACY_ROOT=/opt/atropos-legacy \
     ATROPOS_WORDPRESS_ROOT=/opt/wordpress \
     PATH=/root/.cargo/bin:/root/.nix-profile/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
@@ -64,21 +63,25 @@ RUN curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
         | bash -s -- -y --default-toolchain stable
 
 # Names inside the build context. The default layout is a parent directory
-# holding atropos-libafl, atropos-legacy, and wordpress side by side.
+# holding atropos-libafl and wordpress side by side.
 ARG REPO_SRC=atropos-libafl
-ARG LEGACY_SRC=atropos-legacy
 ARG WORDPRESS_SRC=wordpress
 
 COPY ${REPO_SRC} /opt/atropos-libafl
-COPY ${LEGACY_SRC} /opt/atropos-legacy
 COPY ${WORDPRESS_SRC} /opt/wordpress
 
 WORKDIR /opt/atropos-libafl
 
 RUN chmod 0755 dockerfiles/entrypoint.sh scripts/*.sh \
     && mkdir -p /var/lib/atropos/nyx \
-    && bash scripts/build-nyx-fuzzer.sh \
-    && bash scripts/build-nyx-php.sh \
-    && bash scripts/setup-wordpress.sh
+    && bash scripts/atropos.sh build-fuzzer \
+    && bash scripts/atropos.sh build-php \
+        --src /opt/wordpress \
+        --php-output /var/lib/atropos/nyx/guest \
+        --fuzzer-output /var/lib/atropos/nyx \
+    && bash scripts/atropos.sh setup-wordpress \
+        --src /opt/wordpress \
+        --php-output /var/lib/atropos/nyx/guest \
+        --fuzzer-output /var/lib/atropos/nyx
 
 ENTRYPOINT ["/opt/atropos-libafl/dockerfiles/entrypoint.sh"]

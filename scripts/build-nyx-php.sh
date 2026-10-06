@@ -5,18 +5,44 @@ umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-LEGACY_ROOT="${ATROPOS_LEGACY_ROOT:-$(cd -- "$REPO_ROOT/../atropos-legacy" && pwd)}"
-PHP_SOURCE="$LEGACY_ROOT/php-7.4-patched"
-PCOV_SOURCE="$LEGACY_ROOT/pcov-patched"
-PHP_PREFIX="${ATROPOS_NYX_PHP_PREFIX:-$HOME/.local/opt/atropos-libafl-nyx-php}"
-NYX_DATA_DIR="${ATROPOS_NYX_DATA_DIR:-${HOME:?HOME must be set}/.nyx}"
-ARTIFACT_DIR="${ATROPOS_NYX_GUEST_ARTIFACTS:-$NYX_DATA_DIR/guest}"
 COVERAGE_TOOLS_DIR="$REPO_ROOT/coverage-tools"
 
 if [[ "${ATROPOS_NYX_BUILD_SHELL:-0}" != 1 ]]; then
 	export ATROPOS_NYX_BUILD_SHELL=1
 	exec "$SCRIPT_DIR/with-nyx-build-deps.sh" "$0" "$@"
 fi
+
+PHP_OUTPUT=""
+SRC=""
+SKIP_WORDPRESS=0
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--php-output)
+		PHP_OUTPUT="${2:?--php-output needs a directory}"
+		shift 2
+		;;
+	--src)
+		SRC="${2:?--src needs a directory}"
+		shift 2
+		;;
+	--skip-wordpress)
+		SKIP_WORDPRESS=1
+		shift
+		;;
+	*)
+		printf 'unknown argument: %s\n' "$1" >&2
+		exit 1
+		;;
+	esac
+done
+if [[ -z "$PHP_OUTPUT" ]]; then
+	printf 'usage: build-nyx-php.sh --php-output DIR [--src DIR]\n' >&2
+	exit 1
+fi
+PHP_SOURCE="$REPO_ROOT/guest/php/php-7.4-patched"
+PCOV_SOURCE="$REPO_ROOT/guest/php/pcov-patched"
+PHP_PREFIX="$PHP_OUTPUT/prefix"
+ARTIFACT_DIR="$PHP_OUTPUT"
 
 BUILD_TMPDIR="${ATROPOS_BUILD_TMPDIR:-${TMPDIR:-/tmp}}"
 BUILD_ROOT="$(mktemp -d "$BUILD_TMPDIR/atropos-nyx-php.XXXXXX")"
@@ -41,7 +67,7 @@ for dependency in autoconf make patch lddtree nim nimble curl git; do
 	fi
 done
 if [[ ! -f "$PHP_SOURCE/configure.ac" || ! -f "$PCOV_SOURCE/config.m4" ]]; then
-	printf 'Missing patched PHP/PCOV sources under %s\n' "$LEGACY_ROOT" >&2
+	printf 'Missing patched PHP/PCOV sources under %s\n' "$REPO_ROOT/guest/php" >&2
 	exit 1
 fi
 if [[ ! -f "$COVERAGE_TOOLS_DIR/composer.json" || ! -f "$COVERAGE_TOOLS_DIR/composer.lock" ]]; then
@@ -404,7 +430,7 @@ if [[ "${ATROPOS_NYX_SKIP_AGENT:-0}" != 1 ]]; then
 	FASTCGI_PATH="$(dirname -- "$(dirname -- "$FASTCGI_CLIENT")")"
 	cp -- "$REPO_ROOT/guest/php/atropos_agent.nim" \
 		"$REPO_ROOT/guest/common/nyx_dump_file.c" \
-		"$LEGACY_ROOT/fuzzer/nyx.c" "$LEGACY_ROOT/fuzzer/nyx.h" "$AGENT_SOURCE/"
+		"$REPO_ROOT/guest/common/nyx.c" "$REPO_ROOT/guest/common/nyx.h" "$AGENT_SOURCE/"
 	python3 - "$AGENT_SOURCE/nyx.c" <<'PYTHON'
 from pathlib import Path
 import sys
@@ -442,11 +468,14 @@ PYTHON
 	done < <(lddtree -l "$ARTIFACT_DIR/atropos_agent")
 fi
 
-if [[ "${ATROPOS_NYX_SKIP_WORDPRESS:-0}" != 1 ]]; then
-	WP_ROOT="${ATROPOS_WORDPRESS_ROOT:-$REPO_ROOT/../wordpress}"
-	WP_ROOT="$(realpath -- "$WP_ROOT")"
+if [[ "$SKIP_WORDPRESS" != 1 ]]; then
+	if [[ -z "$SRC" ]]; then
+		printf 'build-nyx-php.sh needs --src or --skip-wordpress\n' >&2
+		exit 1
+	fi
+	WP_ROOT="$(realpath -- "$SRC")"
 	if [[ ! -f "$WP_ROOT/index.php" ]]; then
-		printf 'WordPress not found under %s; set ATROPOS_WORDPRESS_ROOT\n' "$WP_ROOT" >&2
+		printf 'WordPress not found under %s; pass --src\n' "$WP_ROOT" >&2
 		exit 1
 	fi
 	mkdir -p "$ARTIFACT_DIR/wordpress"
