@@ -109,33 +109,12 @@ write_files:
       #!/usr/bin/env bash
       set -euxo pipefail
       export DEBIAN_FRONTEND=noninteractive
-      mkdir -p /etc/mysql/mariadb.conf.d
-      cat >/etc/mysql/mariadb.conf.d/90-atropos-nyx.cnf <<'MYSQL'
-      [mysqld]
-      innodb_use_native_aio=0
-      innodb_flush_method=fsync
-      MYSQL
-      cat >/usr/sbin/policy-rc.d <<'POLICY'
-      #!/bin/sh
-      exit 101
-      POLICY
-      chmod 0755 /usr/sbin/policy-rc.d
-      if ! dpkg-query -W -f='${Status}' mariadb-server 2>/dev/null | grep -qx 'install ok installed'; then
-        apt-get update
-        apt-get install -y mariadb-server
-      fi
-      rm -f /usr/sbin/policy-rc.d
       mkdir -p /mnt/atropos-payload
       mount -L ATROPOSPAYLOAD /mnt/atropos-payload
       mkdir -p /root/atropos-nyx
       tar -xzf /mnt/atropos-payload/guest-bundle.tar.gz -C /root/atropos-nyx
       chmod 0700 /root/atropos-nyx/install-guest.sh
-      if ! /root/atropos-nyx/install-guest.sh; then
-        systemctl status mariadb.service --no-pager --full || true
-        journalctl -b -u mariadb.service --no-pager --full || true
-        cat /var/log/mysql/error.log || true
-        exit 1
-      fi
+      /root/atropos-nyx/install-guest.sh
       sync
       echo ATROPOS_NYX_GUEST_READY
       shutdown -h now
@@ -150,9 +129,9 @@ if [[ "${ATROPOS_NYX_SKIP_CLOUD_INIT:-0}" != 1 ]]; then
 	if [[ ! -e "$VM_DIR/cloud-init-complete" || "$(cat "$VM_DIR/cloud-init-complete")" != "$BUNDLE_SHA" ]]; then
 		if [[ -e "$VM_DIR/cloud-init-complete" ]]; then
 			BUNDLE_CHANGED=1
-			printf 'Refreshing the guest because its packaged runtime or WordPress tree changed.\n'
+			printf 'Refreshing the guest because its packaged runtime or PHP application changed.\n'
 		else
-			printf 'Provisioning Ubuntu guest; cloud-init installs MariaDB and imports the local WordPress snapshot.\n'
+			printf 'Provisioning Ubuntu guest and installing the packaged PHP application.\n'
 		fi
 		set +e
 		timeout --signal=TERM 30m "$QEMU_TCG" \

@@ -198,6 +198,10 @@ proc warmupOpcache(): bool =
   warmedIndex
 
 proc flushPermalinks(): bool =
+  # WordPress is the adapted app that rewrites permalinks before the snapshot.
+  # Other PHP apps leave /tmp/atropos-app-id set to their name and skip this.
+  if fileExists("/tmp/atropos-app-id") and readFile("/tmp/atropos-app-id").strip != "wordpress":
+    return true
   let command = fmt"IN_NYX=1 SHM_ID={nyx_get_shm_id()} BITMAP_SIZE={nyx_get_bitmap_size()} " &
     "LD_LIBRARY_PATH=/tmp/ LD_BIND_NOW=1 " &
     "/tmp/php-cli -c /tmp/php.ini -d auto_prepend_file= -d auto_append_file= -d pcov.enabled=0 " &

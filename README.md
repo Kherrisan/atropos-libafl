@@ -6,7 +6,7 @@ The PHP 7.4 and PCOV sources live in `guest/php`. `guest/common/nyx.c` and `gues
 
 ## Execution environment
 
-The `atropos-libafl-nyx` container needs access to KVM for Nyx. Keep the WordPress source tree visible in the build environment. `scripts/atropos.sh` takes `--src`; the default is `../wordpress`. Network access is needed while fetching pinned build dependencies and provisioning the guest.
+The `atropos-libafl-nyx` container needs access to KVM for Nyx. Keep the PHP application source tree visible in the build environment. `scripts/atropos.sh` takes `--src`; the default is `../wordpress`. Pass `--app wordpress` or `--app generic` to `package-guest`. Network access is needed while fetching pinned build dependencies and provisioning the guest.
 
 The build environment uses a Nixpkgs 22.11 build shell for PHP 7.4 dependencies, MariaDB, QEMU build tools, and cloud-image utilities.
 
@@ -27,15 +27,16 @@ scripts/atropos.sh build-php --src ../wordpress --php-output ~/.nyx/guest --fuzz
 The PHP build uses `guest/php/php-7.4-patched` and `guest/php/pcov-patched`. The guest agent runs `php-cgi` as the target and installs `https://github.com/egueler/fastcgi.nim-patched.git` for the request channel. `php-cli` remains in the runtime for the permalink flush. PCOV still reads its coverage bitmap from shared memory; that extension is separate from request delivery.
 If PHP and PCOV have already built with this shared-memory runtime but the Nim guest-agent step needs retrying, run `ATROPOS_NYX_REUSE_PHP=1 scripts/atropos.sh build-php`.
 
-## Prepare the WordPress database
+## Package the guest and initialize it in the VM
 
-Initialize MariaDB and the WordPress tables. This creates local credentials in `~/.config/atropos-libafl/wordpress-db.env` and writes a local `wp-config.php` into the WordPress tree if one is not already present:
+`package-guest` copies the PHP runtime and `--src` into `guest-bundle.tar.gz`. It does not build the database. `create-vm` boots an empty Ubuntu image, and cloud-init runs the bundle's `install-guest.sh`: install MariaDB when the app needs it, initialize the data directory, install the Nyx agent, copy the application to `/var/www/html`, and install PHP. WordPress then runs `wp_install` inside the guest. `ATROPOS_NYX_GUEST_READY` means that setup finished.
 
 ```sh
-scripts/atropos.sh setup-wordpress --src ../wordpress --php-output ~/.nyx/guest
+scripts/atropos.sh package-guest --src ../wordpress --app wordpress --php-output ~/.nyx/guest --fuzzer-output ~/.nyx
+scripts/atropos.sh create-vm --fuzzer-output ~/.nyx
 ```
 
-The service listens on `127.0.0.1:33060`. Its database is dumped into the local Nyx guest bundle by the next step; no database or credential file is added to this Git checkout.
+Spring is packaged first with `package-spring`, then installed by `create-spring-vm`. A generic PHP app can pass `--app generic`. `--db-env` still imports a host SQL dump instead of initializing in the guest.
 
 ## Enable KVM's Nyx backdoor
 
@@ -91,7 +92,8 @@ Useful environment variables:
 | --- | --- | --- |
 | `--fuzzer-output` | `~/.nyx` | Root directory for Nyx VM, snapshot, bundle, share, and workdir |
 | `--php-output` | `<fuzzer-output>/guest` | PHP guest artifacts and `<php-output>/prefix` install |
-| `--src` | `../wordpress` | WordPress source tree |
+| `--src` | `../wordpress` | PHP application source tree |
+| `--app` | `wordpress` | `package-guest` adapter: `wordpress` or `generic` |
 | `ATROPOS_NYX_CPU` | `0` | Nyx worker ID |
 | `ATROPOS_NYX_COVERAGE_TIMEOUT_SECS` | `60` | Per-testcase timeout while collecting detailed queue coverage |
 | `ATROPOS_NYX_ITERS` | unlimited | Stop after this many stage passes (each may run multiple mutation candidates) |

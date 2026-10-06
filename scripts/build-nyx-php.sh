@@ -25,7 +25,7 @@ while [[ $# -gt 0 ]]; do
 		SRC="${2:?--src needs a directory}"
 		shift 2
 		;;
-	--skip-wordpress)
+	--skip-wordpress | --skip-app)
 		SKIP_WORDPRESS=1
 		shift
 		;;
@@ -331,7 +331,7 @@ COMPOSER_HOME="$BUILD_ROOT/composer-home" \
 COMPOSER_CACHE_DIR="$PHP_PREFIX/.composer/cache" \
 COMPOSER_VENDOR_DIR="$COVERAGE_VENDOR_DIR" \
 COMPOSER_MEMORY_LIMIT=-1 \
-	"$PHP_CLI" "$COMPOSER_PHAR" install --working-dir="$COVERAGE_TOOLS_DIR" --no-dev \
+	"$PHP_CLI" -n "$COMPOSER_PHAR" install --working-dir="$COVERAGE_TOOLS_DIR" --no-dev \
 		--prefer-dist --no-interaction --classmap-authoritative
 cp -- "$COVERAGE_TOOLS_DIR/auto-prepend.php" "$ARTIFACT_DIR/atropos-coverage-auto-prepend.php"
 cp -- "$COVERAGE_TOOLS_DIR/auto-append.php" "$ARTIFACT_DIR/atropos-coverage-auto-append.php"
@@ -470,19 +470,19 @@ fi
 
 if [[ "$SKIP_WORDPRESS" != 1 ]]; then
 	if [[ -z "$SRC" ]]; then
-		printf 'build-nyx-php.sh needs --src or --skip-wordpress\n' >&2
+		printf 'build-nyx-php.sh needs --src or --skip-app\n' >&2
 		exit 1
 	fi
 	WP_ROOT="$(realpath -- "$SRC")"
 	if [[ ! -f "$WP_ROOT/index.php" ]]; then
-		printf 'WordPress not found under %s; pass --src\n' "$WP_ROOT" >&2
+		printf 'PHP application not found under %s; pass --src\n' "$WP_ROOT" >&2
 		exit 1
 	fi
-	mkdir -p "$ARTIFACT_DIR/wordpress"
-	chmod 700 "$ARTIFACT_DIR/wordpress"
-	tar --exclude=.git -C "$WP_ROOT" -cf - . | tar -C "$ARTIFACT_DIR/wordpress" -xf -
-	if [[ -f "$ARTIFACT_DIR/wordpress/wp-config.php" ]]; then
-		python3 - "$ARTIFACT_DIR/wordpress/wp-config.php" <<'PY'
+	mkdir -p "$ARTIFACT_DIR/webapp"
+	chmod 700 "$ARTIFACT_DIR/webapp"
+	tar --exclude=.git -C "$WP_ROOT" -cf - . | tar -C "$ARTIFACT_DIR/webapp" -xf -
+	if [[ -f "$ARTIFACT_DIR/webapp/wp-config.php" ]]; then
+		python3 - "$ARTIFACT_DIR/webapp/wp-config.php" <<'PY'
 from pathlib import Path
 import sys
 

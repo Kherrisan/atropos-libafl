@@ -23,7 +23,9 @@ commands:
   create-spring-vm
 
 options:
-  --src DIR             WordPress source tree (default: ../wordpress)
+  --src DIR             PHP application source tree (default: ../wordpress)
+  --app NAME            PHP app adapter: wordpress or generic (default: wordpress)
+  --db-env FILE         Database credential file for package-guest
   --php-output DIR      PHP guest artifacts and install prefix (default: <fuzzer-output>/guest)
   --fuzzer-output DIR   Nyx images, bundle, share, and workdir (default: ~/.nyx)
   --target php|spring   guest selected by run (default: php)
@@ -40,6 +42,8 @@ shift
 
 SRC=""
 SRC_SET=0
+APP="wordpress"
+DB_ENV=""
 PHP_OUTPUT=""
 FUZZER_OUTPUT=""
 TARGET="php"
@@ -50,6 +54,14 @@ while [[ $# -gt 0 ]]; do
 	--src)
 		SRC="${2:?--src needs a directory}"
 		SRC_SET=1
+		shift 2
+		;;
+	--app)
+		APP="${2:?--app needs wordpress or generic}"
+		shift 2
+		;;
+	--db-env)
+		DB_ENV="${2:?--db-env needs a file}"
 		shift 2
 		;;
 	--php-output)
@@ -101,10 +113,10 @@ build-php)
 	if [[ -f "$SRC/index.php" ]]; then
 		args+=(--src "$SRC")
 	elif [[ "$SRC_SET" == 1 ]]; then
-		printf 'WordPress source not found under %s\n' "$SRC" >&2
+		printf 'PHP application source not found under %s\n' "$SRC" >&2
 		exit 1
 	else
-		args+=(--skip-wordpress)
+		args+=(--skip-app)
 	fi
 	exec "$SCRIPT_DIR/build-nyx-php.sh" "${args[@]}"
 	;;
@@ -112,10 +124,16 @@ setup-wordpress)
 	exec "$SCRIPT_DIR/setup-wordpress.sh" --src "$SRC" --php-output "$PHP_OUTPUT"
 	;;
 package-guest)
-	exec "$SCRIPT_DIR/package-nyx-guest.sh" \
-		--src "$SRC" \
-		--php-output "$PHP_OUTPUT" \
+	args=(
+		--src "$SRC"
+		--php-output "$PHP_OUTPUT"
 		--fuzzer-output "$FUZZER_OUTPUT"
+		--app "$APP"
+	)
+	if [[ -n "$DB_ENV" ]]; then
+		args+=(--db-env "$DB_ENV")
+	fi
+	exec "$SCRIPT_DIR/package-nyx-guest.sh" "${args[@]}"
 	;;
 create-vm)
 	exec "$SCRIPT_DIR/create-nyx-vm.sh" --fuzzer-output "$FUZZER_OUTPUT"

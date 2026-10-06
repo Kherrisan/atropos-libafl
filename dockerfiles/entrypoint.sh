@@ -54,7 +54,6 @@ exec 9>"$ATROPOS_NYX_DATA_DIR/.provision.lock"
 flock 9
 if ! snapshot_ready; then
 	printf 'Nyx guest image or pre-snapshot is missing; provisioning into %s\n' "$ATROPOS_NYX_DATA_DIR"
-	start_mariadb
 	bash "$REPO_ROOT/scripts/atropos.sh" package-guest \
 		--src /opt/wordpress \
 		--php-output /var/lib/atropos/nyx/guest \
