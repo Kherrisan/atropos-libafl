@@ -13,12 +13,22 @@ if [[ "${ATROPOS_NYX_BUILD_SHELL:-0}" != 1 ]]; then
 fi
 
 PHP_OUTPUT=""
+PHP_SRC=""
+PCOV_SRC=""
 SRC=""
 SKIP_WORDPRESS=0
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--php-output)
 		PHP_OUTPUT="${2:?--php-output needs a directory}"
+		shift 2
+		;;
+	--php-src)
+		PHP_SRC="${2:?--php-src needs a directory}"
+		shift 2
+		;;
+	--pcov-src)
+		PCOV_SRC="${2:?--pcov-src needs a directory}"
 		shift 2
 		;;
 	--src)
@@ -35,12 +45,12 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
-if [[ -z "$PHP_OUTPUT" ]]; then
-	printf 'usage: build-nyx-php.sh --php-output DIR [--src DIR]\n' >&2
+if [[ -z "$PHP_OUTPUT" || -z "$PHP_SRC" || -z "$PCOV_SRC" ]]; then
+	printf 'usage: build-nyx-php.sh --php-output DIR --php-src DIR --pcov-src DIR [--src DIR]\n' >&2
 	exit 1
 fi
-PHP_SOURCE="$REPO_ROOT/guest/php/php-7.4-patched"
-PCOV_SOURCE="$REPO_ROOT/guest/php/pcov-patched"
+PHP_SOURCE="$PHP_SRC"
+PCOV_SOURCE="$PCOV_SRC"
 PHP_PREFIX="$PHP_OUTPUT/prefix"
 ARTIFACT_DIR="$PHP_OUTPUT"
 
@@ -67,7 +77,7 @@ for dependency in autoconf make patch lddtree nim nimble curl git; do
 	fi
 done
 if [[ ! -f "$PHP_SOURCE/configure.ac" || ! -f "$PCOV_SOURCE/config.m4" ]]; then
-	printf 'Missing patched PHP/PCOV sources under %s\n' "$REPO_ROOT/guest/php" >&2
+	printf 'Missing patched PHP/PCOV sources under %s and %s\n' "$PHP_SOURCE" "$PCOV_SOURCE" >&2
 	exit 1
 fi
 if [[ ! -f "$COVERAGE_TOOLS_DIR/composer.json" || ! -f "$COVERAGE_TOOLS_DIR/composer.lock" ]]; then

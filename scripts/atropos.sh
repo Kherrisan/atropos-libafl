@@ -27,6 +27,9 @@ options:
   --app NAME            PHP app adapter: wordpress or generic (default: wordpress)
   --db-env FILE         Database credential file for package-guest
   --php-output DIR      PHP guest artifacts and install prefix (default: <fuzzer-output>/guest)
+  --php-src DIR         PHP 7.4 source tree (default: guest/php/php-7.4-patched)
+  --pcov-src DIR        PCOV source tree (default: guest/php/pcov-patched)
+  --springfuzz-src DIR  SpringFuzz source tree (default: SpringFuzz submodule)
   --fuzzer-output DIR   Nyx images, bundle, share, and workdir (default: ~/.nyx)
   --target php|spring   guest selected by run (default: php)
   --cpu-set LIST        CPU list for run (default: the built-in set)
@@ -45,6 +48,9 @@ SRC_SET=0
 APP="wordpress"
 DB_ENV=""
 PHP_OUTPUT=""
+PHP_SRC=""
+PCOV_SRC=""
+SPRINGFUZZ_SRC=""
 FUZZER_OUTPUT=""
 TARGET="php"
 CPU_SET=""
@@ -66,6 +72,18 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--php-output)
 		PHP_OUTPUT="${2:?--php-output needs a directory}"
+		shift 2
+		;;
+	--php-src)
+		PHP_SRC="${2:?--php-src needs a directory}"
+		shift 2
+		;;
+	--pcov-src)
+		PCOV_SRC="${2:?--pcov-src needs a directory}"
+		shift 2
+		;;
+	--springfuzz-src)
+		SPRINGFUZZ_SRC="${2:?--springfuzz-src needs a directory}"
 		shift 2
 		;;
 	--fuzzer-output)
@@ -98,6 +116,9 @@ done
 
 FUZZER_OUTPUT="${FUZZER_OUTPUT:-${HOME:?HOME must be set}/.nyx}"
 PHP_OUTPUT="${PHP_OUTPUT:-$FUZZER_OUTPUT/guest}"
+PHP_SRC="${PHP_SRC:-$REPO_ROOT/guest/php/php-7.4-patched}"
+PCOV_SRC="${PCOV_SRC:-$REPO_ROOT/guest/php/pcov-patched}"
+SPRINGFUZZ_SRC="${SPRINGFUZZ_SRC:-$REPO_ROOT/SpringFuzz}"
 SRC="${SRC:-$REPO_ROOT/../wordpress}"
 
 case "$command" in
@@ -109,7 +130,7 @@ build-fuzzer)
 	exec "$SCRIPT_DIR/build-nyx-fuzzer.sh"
 	;;
 build-php)
-	args=(--php-output "$PHP_OUTPUT")
+	args=(--php-output "$PHP_OUTPUT" --php-src "$PHP_SRC" --pcov-src "$PCOV_SRC")
 	if [[ -f "$SRC/index.php" ]]; then
 		args+=(--src "$SRC")
 	elif [[ "$SRC_SET" == 1 ]]; then
@@ -146,7 +167,7 @@ run)
 	exec "$SCRIPT_DIR/run-fuzzer.sh" "${args[@]}" "${extra[@]}"
 	;;
 build-spring)
-	exec "$SCRIPT_DIR/build-nyx-spring.sh" --fuzzer-output "$FUZZER_OUTPUT"
+	exec "$SCRIPT_DIR/build-nyx-spring.sh" --fuzzer-output "$FUZZER_OUTPUT" --springfuzz-src "$SPRINGFUZZ_SRC"
 	;;
 package-spring)
 	exec "$SCRIPT_DIR/package-nyx-spring-guest.sh" --fuzzer-output "$FUZZER_OUTPUT"

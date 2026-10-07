@@ -1,0 +1,3 @@
+[submodule "SpringFuzz"]
+	path = SpringFuzz
+	url = https://github.com/H4de5-7/SpringFuzz.git

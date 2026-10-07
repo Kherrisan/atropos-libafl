@@ -5,10 +5,15 @@ export LC_ALL=C
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 FUZZER_OUTPUT=""
+SPRINGFUZZ_ROOT=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--fuzzer-output)
 		FUZZER_OUTPUT="${2:?--fuzzer-output needs a directory}"
+		shift 2
+		;;
+	--springfuzz-src)
+		SPRINGFUZZ_ROOT="${2:?--springfuzz-src needs a directory}"
 		shift 2
 		;;
 	*)
@@ -17,11 +22,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
-if [[ -z "$FUZZER_OUTPUT" ]]; then
-	printf 'usage: build-nyx-spring.sh --fuzzer-output DIR\n' >&2
+if [[ -z "$FUZZER_OUTPUT" || -z "$SPRINGFUZZ_ROOT" ]]; then
+	printf 'usage: build-nyx-spring.sh --fuzzer-output DIR --springfuzz-src DIR\n' >&2
 	exit 1
 fi
-SPRINGFUZZ_ROOT="$REPO_ROOT/third-party/SpringFuzz"
 DATA_DIR="$FUZZER_OUTPUT/spring"
 GUEST_DIR="$DATA_DIR/guest"
 BUILD_ROOT="${ATROPOS_SPRING_BUILD_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/atropos-spring.XXXXXX")}"

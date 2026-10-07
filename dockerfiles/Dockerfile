@@ -5,9 +5,12 @@
 #
 #   docker build -f atropos-libafl/dockerfiles/Dockerfile -t atropos-libafl .
 #
-# The image builds the fuzzer and the PHP guest runtime. Creating the Ubuntu
-# guest disk and the Nyx pre-snapshot needs /dev/kvm, so that step runs in the
-# entrypoint on first start and is stored under /var/lib/atropos/nyx.
+# The image builds the fuzzer, the PHP guest runtime, and the Spring guest
+# runtime. The first container
+# start packages that runtime with the WordPress tree and creates the Ubuntu
+# disk. MariaDB installation, database initialization, and wp_install run
+# inside that guest during cloud-init. The disk and Nyx pre-snapshot need
+# /dev/kvm and are stored under /var/lib/atropos/nyx.
 #
 # Do not reload the host KVM module from a container. The host must already
 # have enable_vmware_backdoor=Y. Reloading KVM stops every other instance.
@@ -22,7 +25,7 @@
 #
 # The first container must be able to write the volume. Later containers can
 # mount the same snapshot. Pass fuzzer arguments after the image name; they
-# are forwarded to scripts/run-fuzzer.sh.
+# are forwarded to scripts/atropos.sh run.
 
 FROM ubuntu:24.04
 
@@ -30,7 +33,6 @@ ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C \
     ATROPOS_NYX_DATA_DIR=/var/lib/atropos/nyx \
-    ATROPOS_WORDPRESS_ROOT=/opt/wordpress \
     PATH=/root/.cargo/bin:/root/.nix-profile/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -72,16 +74,22 @@ COPY ${WORDPRESS_SRC} /opt/wordpress
 
 WORKDIR /opt/atropos-libafl
 
+# The SpringFuzz submodule is not always present in the build context.
+ARG SPRINGFUZZ_URL=https://github.com/H4de5-7/SpringFuzz.git
+ARG SPRINGFUZZ_REV=8387aeaf736d08959e2d5e598e9b6e0ee6d18455
+RUN if [ ! -f SpringFuzz/pom.xml ]; then \
+        git clone "$SPRINGFUZZ_URL" SpringFuzz \
+        && git -C SpringFuzz checkout "$SPRINGFUZZ_REV"; \
+    fi
+
 RUN chmod 0755 dockerfiles/entrypoint.sh scripts/*.sh \
     && mkdir -p /var/lib/atropos/nyx \
     && bash scripts/atropos.sh build-fuzzer \
     && bash scripts/atropos.sh build-php \
-        --src /opt/wordpress \
         --php-output /var/lib/atropos/nyx/guest \
         --fuzzer-output /var/lib/atropos/nyx \
-    && bash scripts/atropos.sh setup-wordpress \
-        --src /opt/wordpress \
-        --php-output /var/lib/atropos/nyx/guest \
+    && bash scripts/atropos.sh build-spring \
+        --springfuzz-src /opt/atropos-libafl/SpringFuzz \
         --fuzzer-output /var/lib/atropos/nyx
 
 ENTRYPOINT ["/opt/atropos-libafl/dockerfiles/entrypoint.sh"]

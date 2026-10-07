@@ -24,7 +24,7 @@ Build PHP 7.4 CLI/CGI, Nyx-aware PCOV, PHP_CodeCoverage 9.2.31, phpcov 8.2.1, th
 scripts/atropos.sh build-php --src ../wordpress --php-output ~/.nyx/guest --fuzzer-output ~/.nyx
 ```
 
-The PHP build uses `guest/php/php-7.4-patched` and `guest/php/pcov-patched`. The guest agent runs `php-cgi` as the target and installs `https://github.com/egueler/fastcgi.nim-patched.git` for the request channel. `php-cli` remains in the runtime for the permalink flush. PCOV still reads its coverage bitmap from shared memory; that extension is separate from request delivery.
+The PHP build uses `--php-src` and `--pcov-src`, which default to `guest/php/php-7.4-patched` and `guest/php/pcov-patched`. `build-spring` uses `--springfuzz-src`, which defaults to the `SpringFuzz` submodule. The guest agent runs `php-cgi` as the target and installs `https://github.com/egueler/fastcgi.nim-patched.git` for the request channel. `php-cli` remains in the runtime for the permalink flush. PCOV still reads its coverage bitmap from shared memory; that extension is separate from request delivery.
 If PHP and PCOV have already built with this shared-memory runtime but the Nim guest-agent step needs retrying, run `ATROPOS_NYX_REUSE_PHP=1 scripts/atropos.sh build-php`.
 
 ## Package the guest and initialize it in the VM
