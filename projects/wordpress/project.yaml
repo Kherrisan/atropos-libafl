@@ -1,0 +1,8 @@
+name: wordpress
+language: php
+main_repo: https://github.com/WordPress/WordPress
+backend: php
+auth_script: auth.py
+build_script: build.sh
+setup_script: setup.sh
+seeds: seeds

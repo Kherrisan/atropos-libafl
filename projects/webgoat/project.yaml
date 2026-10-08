@@ -1,0 +1,8 @@
+name: webgoat
+language: java
+main_repo: https://github.com/WebGoat/WebGoat
+backend: spring
+auth_script: auth.py
+build_script: build.sh
+setup_script: setup.sh
+seeds: seeds

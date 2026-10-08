@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 FUZZER_OUTPUT=""
 SPRINGFUZZ_ROOT=""
+WEBGOAT_JAR=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--fuzzer-output)
@@ -16,6 +17,10 @@ while [[ $# -gt 0 ]]; do
 		SPRINGFUZZ_ROOT="${2:?--springfuzz-src needs a directory}"
 		shift 2
 		;;
+	--webgoat-jar)
+		WEBGOAT_JAR="${2:?--webgoat-jar needs a file}"
+		shift 2
+		;;
 	*)
 		printf 'unknown argument: %s\n' "$1" >&2
 		exit 1
@@ -23,7 +28,7 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 if [[ -z "$FUZZER_OUTPUT" || -z "$SPRINGFUZZ_ROOT" ]]; then
-	printf 'usage: build-nyx-spring.sh --fuzzer-output DIR --springfuzz-src DIR\n' >&2
+	printf 'usage: build-nyx-spring.sh --fuzzer-output DIR --springfuzz-src DIR [--webgoat-jar FILE]\n' >&2
 	exit 1
 fi
 DATA_DIR="$FUZZER_OUTPUT/spring"
@@ -244,7 +249,13 @@ printf 'Building the springdoc and OpenAPI security helper\n'
 cp -- "$REPO_ROOT/guest/spring/support/target/atropos-spring-support-1.0.0.jar" \
 	"$BUILD_ROOT/spring-extra/"
 
-if [[ ! -f "$GUEST_DIR/webgoat-2023.8.jar" ]]; then
+if [[ -n "$WEBGOAT_JAR" ]]; then
+	if [[ ! -f "$WEBGOAT_JAR" ]]; then
+		printf 'WebGoat jar is missing: %s\n' "$WEBGOAT_JAR" >&2
+		exit 1
+	fi
+	cp -- "$WEBGOAT_JAR" "$GUEST_DIR/webgoat-2023.8.jar"
+elif [[ ! -f "$GUEST_DIR/webgoat-2023.8.jar" ]]; then
 	curl --fail --location --retry 3 --output "$GUEST_DIR/webgoat-2023.8.jar.part" "$WEBGOAT_URL"
 	mv -- "$GUEST_DIR/webgoat-2023.8.jar.part" "$GUEST_DIR/webgoat-2023.8.jar"
 fi

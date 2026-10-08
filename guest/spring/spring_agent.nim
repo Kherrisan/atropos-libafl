@@ -231,6 +231,21 @@ proc publishSession(session: string) =
   dumpText("session-cookie.txt", cookie)
   guestLog("ATROPOS_SPRING_SESSION JSESSIONID=" & cookie & "\n")
 
+proc runAuthScript(): bool =
+  # Project login runs once, after the JVM is listening. Warmup and OpenAPI
+  # export do not read the cookie file.
+  const path = "/usr/local/lib/atropos/auth.py"
+  const logPath = "/tmp/atropos-auth.log"
+  if not fileExists(path):
+    return true
+  guestLog("Running the project auth script after the JVM is listening\n")
+  if execCmd("python3 " & path & " >" & logPath & " 2>&1") == 0:
+    return true
+  guestLog("Project auth script failed\n")
+  if fileExists(logPath):
+    guestLog(readFile(logPath))
+  false
+
 proc reportBugFile() =
   if not fileExists(BugFile):
     return
@@ -249,15 +264,21 @@ proc main() =
       guestLog(readFile("/tmp/webgoat.log"))
     quit(1)
 
-  let session = loginWebGoat()
-  if session.len == 0:
-    guestLog("WebGoat did not return a session cookie\n")
-    if fileExists("/tmp/webgoat.log"):
-      guestLog(readFile("/tmp/webgoat.log"))
-    quit(1)
-  warmup(session)
-  exportOpenApi(session)
-  publishSession(session)
+  if fileExists("/usr/local/lib/atropos/auth.py"):
+    if not runAuthScript():
+      quit(1)
+    warmup("")
+    exportOpenApi("")
+  else:
+    let session = loginWebGoat()
+    if session.len == 0:
+      guestLog("WebGoat did not return a session cookie\n")
+      if fileExists("/tmp/webgoat.log"):
+        guestLog(readFile("/tmp/webgoat.log"))
+      quit(1)
+    warmup(session)
+    exportOpenApi(session)
+    publishSession(session)
   writeFile(FuzzFlag, "1")
   var jniStatus = "missing"
   if fileExists("/tmp/nyx-bitmap-jni.txt"):

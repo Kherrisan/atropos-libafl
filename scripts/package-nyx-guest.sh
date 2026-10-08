@@ -92,6 +92,9 @@ if present:
 PY
 fi
 
+mkdir -p "$BUNDLE_DIR"
+chmod 700 "$BUNDLE_DIR"
+
 if [[ -n "${DB_ENV:-}" ]]; then
 if ! command -v mariadb-dump >/dev/null 2>&1; then
 	printf 'mariadb-dump is unavailable; run this script through scripts/with-nyx-build-deps.sh\n' >&2
@@ -162,6 +165,19 @@ fi
 rm -f -- "$BUNDLE_DIR/nyx-preimage.c"
 chmod 0755 "$BUNDLE_DIR/atropos-nyx-preimage"
 printf '%s\n' "$APP" >"$BUNDLE_DIR/app-id"
+if [[ -n "${SETUP_SCRIPT:-}" ]]; then
+	cp -- "$SETUP_SCRIPT" "$BUNDLE_DIR/setup.sh"
+	chmod 0755 "$BUNDLE_DIR/setup.sh"
+fi
+if [[ -n "${AUTH_SCRIPT:-}" ]]; then
+	cp -- "$AUTH_SCRIPT" "$BUNDLE_DIR/auth.py"
+	chmod 0755 "$BUNDLE_DIR/auth.py"
+fi
+if [[ -n "${PROJECT_OUT:-}" && -d "$PROJECT_OUT" ]]; then
+	rm -rf -- "$BUNDLE_DIR/out"
+	mkdir -p "$BUNDLE_DIR/out"
+	cp -a "$PROJECT_OUT"/. "$BUNDLE_DIR/out/"
+fi
 chmod 644 "$BUNDLE_DIR/app-id"
 rm -rf -- "$BUNDLE_DIR/webapp"
 mkdir -m 700 "$BUNDLE_DIR/webapp"
@@ -321,6 +337,17 @@ if [[ -f /usr/local/lib/atropos-nyx-php/opcache.so ]]; then
 fi
 cp -- app-id /usr/local/lib/atropos-nyx-php/atropos-app-id
 chmod 0644 /usr/local/lib/atropos-nyx-php/atropos-app-id
+install -d -o root -g root -m 0755 /usr/local/lib/atropos
+if [[ -f auth.py ]]; then
+	# The agent runs this after php-cgi is listening.
+	cp -- auth.py /usr/local/lib/atropos/auth.py
+	chmod 0755 /usr/local/lib/atropos/auth.py
+	if ! command -v python3 >/dev/null 2>&1; then
+		export DEBIAN_FRONTEND=noninteractive
+		apt-get update
+		apt-get install -y python3
+	fi
+fi
 mkdir -p /var/www/html
 find /var/www/html -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 cp -a webapp/. /var/www/html/
@@ -391,11 +418,22 @@ if (!function_exists('is_blog_installed') || !is_blog_installed()) {
 file_put_contents('/var/lib/mysql/.atropos-nyx-db-imported', '');
 PHP
 	chown mysql:mysql /var/lib/mysql/.atropos-nyx-db-initialized 2>/dev/null || true
+fi
+run_guest_php() {
 	/usr/local/lib/atropos-nyx-php/lib/ld-linux-x86-64.so.2 \
 		--library-path /usr/local/lib/atropos-nyx-php/lib \
 		/usr/local/lib/atropos-nyx-php/php-cli -d auto_prepend_file= -d auto_append_file= \
-		-d pcov.enabled=0 /usr/local/lib/atropos-nyx-php/atropos-wp-install.php
-	chown mysql:mysql /var/lib/mysql/.atropos-nyx-db-imported
+		-d pcov.enabled=0 "$@"
+}
+if [[ -f setup.sh ]]; then
+	export APP_ROOT=/root/atropos-nyx/webapp
+	export OUT=/root/atropos-nyx/out
+	bash setup.sh
+	chown mysql:mysql /var/lib/mysql/.atropos-nyx-db-imported 2>/dev/null || true
+elif [[ "$APP_ID" == wordpress && ! -f app-db.sql ]]; then
+	run_guest_php /usr/local/lib/atropos-nyx-php/atropos-wp-install.php
+	run_guest_php /usr/local/lib/atropos-nyx-php/atropos-flush-permalinks.php
+	chown mysql:mysql /var/lib/mysql/.atropos-nyx-db-imported 2>/dev/null || true
 fi
 if [[ -f app-db.sql ]]; then
 	/usr/local/sbin/atropos-nyx-db-import
@@ -477,6 +515,15 @@ EOF
 chmod 0700 "$BUNDLE_DIR/install-guest.sh"
 
 bundle_files=(nyx-php-runtime.tar.gz atropos_agent atropos-nyx-preimage atropos-nyx-launch webapp app-id install-guest.sh)
+if [[ -f "$BUNDLE_DIR/setup.sh" ]]; then
+	bundle_files+=(setup.sh)
+fi
+if [[ -f "$BUNDLE_DIR/auth.py" ]]; then
+	bundle_files+=(auth.py)
+fi
+if [[ -d "$BUNDLE_DIR/out" ]]; then
+	bundle_files+=(out)
+fi
 if [[ -f "$BUNDLE_DIR/app-db.sql" ]]; then
 	bundle_files+=(app-db.sql app-db.env)
 fi

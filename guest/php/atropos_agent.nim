@@ -91,6 +91,9 @@ proc publishPhpCliLog(startSize: int) =
 
 proc startMariaDb(): bool =
   discard execCmd("chmod -R 777 /var/lib/php/sessions/")
+  if execCmd("command -v mariadb-admin >/dev/null 2>&1") != 0:
+    guestLog("MariaDB is not installed; continuing without it\n")
+    return true
   for attempt in 0 ..< 100:
     if execCmd("mariadb-admin --no-defaults --protocol=socket ping --silent >/dev/null 2>&1") == 0:
       return true
@@ -197,16 +200,20 @@ proc warmupOpcache(): bool =
       warmedIndex = true
   warmedIndex
 
-proc flushPermalinks(): bool =
-  # WordPress is the adapted app that rewrites permalinks before the snapshot.
-  # Other PHP apps leave /tmp/atropos-app-id set to their name and skip this.
-  if fileExists("/tmp/atropos-app-id") and readFile("/tmp/atropos-app-id").strip != "wordpress":
+proc runAuthScript(): bool =
+  # Project login runs once, after php-cgi is listening. The cookie file is
+  # for later requests that ask for it. Warmup does not read it.
+  const path = "/usr/local/lib/atropos/auth.py"
+  const logPath = "/tmp/atropos-auth.log"
+  if not fileExists(path):
     return true
-  let command = fmt"IN_NYX=1 SHM_ID={nyx_get_shm_id()} BITMAP_SIZE={nyx_get_bitmap_size()} " &
-    "LD_LIBRARY_PATH=/tmp/ LD_BIND_NOW=1 " &
-    "/tmp/php-cli -c /tmp/php.ini -d auto_prepend_file= -d auto_append_file= -d pcov.enabled=0 " &
-    fmt"/tmp/atropos-flush-permalinks.php >>{PhpLog} 2>&1"
-  execCmd(command) == 0
+  guestLog("Running the project auth script after php-cgi is listening\n")
+  if execCmd("python3 " & path & " >" & logPath & " 2>&1") == 0:
+    return true
+  guestLog("Project auth script failed\n")
+  if fileExists(logPath):
+    guestLog(readFile(logPath))
+  false
 
 proc freshPayload(): string =
   let raw = nyx_get_payload()
@@ -301,11 +308,7 @@ proc main() =
       guestLog(readFile(PhpLog))
     quit(1)
 
-  guestLog("Flushing permalinks before the Nyx snapshot\n")
-  if not flushPermalinks():
-    guestLog("Permalink flush failed\n")
-    if fileExists(PhpLog):
-      guestLog(readFile(PhpLog))
+  if not runAuthScript():
     quit(1)
 
   guestLog("Warming OPcache with FastCGI GET requests\n")
