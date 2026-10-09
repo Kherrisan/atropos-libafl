@@ -4,16 +4,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 ORIGINAL_CWD="$(pwd)"
-NYX_DATA_DIR=""
 TARGET="php"
 CPU_SET=""
+OUTPUT=""
 args=()
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--fuzzer-output)
-		NYX_DATA_DIR="${2:?--fuzzer-output needs a directory}"
-		shift 2
-		;;
 	--target)
 		TARGET="${2:?--target needs php or spring}"
 		shift 2
@@ -22,20 +18,22 @@ while [[ $# -gt 0 ]]; do
 		CPU_SET="${2:?--cpu-set needs a CPU list}"
 		shift 2
 		;;
+	--output)
+		OUTPUT="${2:?--output needs a directory}"
+		shift 2
+		;;
 	*)
 		args+=("$1")
 		shift
 		;;
 	esac
 done
-if [[ -z "$NYX_DATA_DIR" ]]; then
-	printf 'usage: run-fuzzer.sh --fuzzer-output DIR [--target php|spring] [fuzzer flags]\n' >&2
-	exit 1
-fi
+: "${NYX_HOME:=${HOME:?HOME must be set}/.nyx}"
+export NYX_HOME
 if [[ "$TARGET" == spring ]]; then
-	NYX_SHARE="$NYX_DATA_DIR/spring/share"
+	NYX_SHARE="$NYX_HOME/spring/share"
 else
-	NYX_SHARE="$NYX_DATA_DIR/phase-run/share-oracle"
+	NYX_SHARE="$NYX_HOME/phase-run/share-oracle"
 fi
 
 abs_one() {
@@ -144,7 +142,14 @@ if [[ ! -f "$NYX_SHARE/config.ron" ]]; then
 	exit 1
 fi
 
-OUTPUT_DIR="$REPO_ROOT/output"
+if [[ -n "$OUTPUT" ]]; then
+	if [[ "$OUTPUT" != /* ]]; then
+		OUTPUT="$ORIGINAL_CWD/$OUTPUT"
+	fi
+	OUTPUT_DIR="$OUTPUT"
+else
+	OUTPUT_DIR="$REPO_ROOT/output"
+fi
 mkdir -p "$OUTPUT_DIR"
 run_stamp="$(date +%Y%m%d-%H%M)"
 run_id=""
@@ -159,7 +164,6 @@ if [[ -z "$run_id" ]]; then
 	printf 'could not allocate a run directory under %s\n' "$OUTPUT_DIR" >&2
 	exit 1
 fi
-
 RUN_DIR="$OUTPUT_DIR/$run_id"
 mkdir -p "$RUN_DIR"
 LOG_FILE="$RUN_DIR/fuzzer.log"

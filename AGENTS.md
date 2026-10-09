@@ -17,7 +17,7 @@
 - `cargo fmt --check` checks Rust formatting; run `cargo fmt` to apply it.
 - `cargo test` runs the Rust unit tests embedded in modules under `src/`.
 - `scripts/atropos.sh build-fuzzer` builds the Nyx-enabled LibAFL/QEMU toolchain. `scripts/atropos.sh build-php` builds PHP/PCOV and the guest runtime; follow the container setup in `README.md`.
-- After preparing the guest and KVM, use `ATROPOS_NYX_ITERS=20 scripts/atropos.sh run --fuzzer-output ~/.nyx` for a short integration smoke run. The script creates `output/<YYYYMMDD-HHMM>-<4 hex>/`, tees stdout and stderr to `fuzzer.log` there, and starts the fuzzer with that directory as its working directory. Default corpus and objective paths are therefore `corpus/` and `objectives/` inside the run directory. Coverage reports and `llm/queue.json` are written in the same directory. There is no per-execution trace file. Relative `--corpus-dir`, `--objectives-dir`, `--seed-dir`, `--nyx-share`, `--nyx-workdir`, `--mutation-dict`, `--bug-trigger`, and `--openapi` values are resolved from the directory where the script was invoked, before that working-directory change. Nyx images, snapshots, and the QEMU work directory stay under the configured Nyx data directory.
+- After preparing the guest and KVM, use `NYX_HOME=~/.nyx ATROPOS_NYX_ITERS=20 scripts/atropos.sh run` for a short integration smoke run. The script creates `<output>/<YYYYMMDD-HHMM>-<4 hex>/`. `--output` selects that parent directory and defaults to `output/`. It tees stdout and stderr to `fuzzer.log` there, and starts the fuzzer with that directory as its working directory. Default corpus and objective paths are therefore `corpus/` and `objectives/` inside the run directory. Coverage reports and `llm/queue.json` are written in the same directory. There is no per-execution trace file. Relative `--corpus-dir`, `--objectives-dir`, `--seed-dir`, `--nyx-share`, `--nyx-workdir`, `--mutation-dict`, `--bug-trigger`, and `--openapi` values are resolved from the directory where the script was invoked, before that working-directory change. Nyx images, snapshots, and the QEMU work directory stay under `NYX_HOME`.
 
 ## Coding Style
 
@@ -33,4 +33,4 @@ Recent commits use short imperative summaries (for example, “Add queue coverag
 
 ## Configuration and Secrets
 
-Read `README.md` before changing provisioning or runtime setup. Keep local database credentials and WordPress configuration out of the repository; pass machine-specific paths with `scripts/atropos.sh` flags such as `--src`, `--php-output`, and `--fuzzer-output`.
+Read `README.md` before changing provisioning or runtime setup. Keep local database credentials and WordPress configuration out of the repository; pass machine-specific paths with `NYX_HOME` and `scripts/atropos.sh` flags such as `--src` and `--php-output`.

@@ -3,23 +3,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-DATA_DIR=""
-while [[ $# -gt 0 ]]; do
-	case "$1" in
-	--fuzzer-output)
-		DATA_DIR="${2:?--fuzzer-output needs a directory}"
-		shift 2
-		;;
-	*)
-		printf 'unknown argument: %s\n' "$1" >&2
-		exit 1
-		;;
-	esac
-done
-if [[ -z "$DATA_DIR" ]]; then
-	printf 'usage: prepare-nyx-share.sh --fuzzer-output DIR\n' >&2
+if [[ $# -gt 0 ]]; then
+	printf 'unknown argument: %s\n' "$1" >&2
 	exit 1
 fi
+: "${NYX_HOME:=${HOME:?HOME must be set}/.nyx}"
+export NYX_HOME
+DATA_DIR="$NYX_HOME"
 SHARE_DIR="$DATA_DIR/share"
 WORKDIR="$DATA_DIR/workdir"
 VM_DIR="$DATA_DIR/vm"

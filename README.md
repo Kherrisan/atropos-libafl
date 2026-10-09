@@ -21,7 +21,7 @@ scripts/atropos.sh build-fuzzer
 Build PHP 7.4 CLI/CGI, Nyx-aware PCOV, PHP_CodeCoverage 9.2.31, phpcov 8.2.1, the patched Nim FastCGI client, and the Nim guest agent. The build adds two PCOV runtime controls so detailed coverage collection can be enabled only for `coverage_dump` inputs. Composer installs the pinned reporting tools into the local Nyx artifact directory; the original legacy checkout stays unchanged. The PHP install prefix is `<php-output>/prefix` and the guest files are the rest of `--php-output` (default `~/.nyx/guest`):
 
 ```sh
-scripts/atropos.sh build-php --src ../wordpress --php-output ~/.nyx/guest --fuzzer-output ~/.nyx
+NYX_HOME=~/.nyx scripts/atropos.sh build-php --src ../wordpress --php-output ~/.nyx/guest
 ```
 
 The PHP build uses `--php-src` and `--pcov-src`, which default to `guest/php/php-7.4-patched` and `guest/php/pcov-patched`. `build-spring` uses `--springfuzz-src`, which defaults to the `SpringFuzz` submodule. The guest agent runs `php-cgi` as the target and installs `https://github.com/egueler/fastcgi.nim-patched.git` for the request channel. `php-cli` remains in the runtime for the permalink flush. PCOV still reads its coverage bitmap from shared memory; that extension is separate from request delivery.
@@ -32,8 +32,8 @@ If PHP and PCOV have already built with this shared-memory runtime but the Nim g
 `package-guest` copies the PHP runtime and `--src` into `guest-bundle.tar.gz`. It does not build the database. `create-vm` boots an empty Ubuntu image, and cloud-init runs the bundle's `install-guest.sh`: install MariaDB when the app needs it, initialize the data directory, install the Nyx agent, copy the application to `/var/www/html`, and install PHP. WordPress then runs `wp_install` inside the guest. `ATROPOS_NYX_GUEST_READY` means that setup finished.
 
 ```sh
-scripts/atropos.sh package-guest --src ../wordpress --app wordpress --php-output ~/.nyx/guest --fuzzer-output ~/.nyx
-scripts/atropos.sh create-vm --fuzzer-output ~/.nyx
+NYX_HOME=~/.nyx scripts/atropos.sh package-guest --src ../wordpress --app wordpress --php-output ~/.nyx/guest
+NYX_HOME=~/.nyx scripts/atropos.sh create-vm
 ```
 
 Spring is packaged first with `package-spring`, then installed by `create-spring-vm`. A generic PHP app can pass `--app generic`. `--db-env` still imports a host SQL dump instead of initializing in the guest.
@@ -53,22 +53,22 @@ The script writes `/etc/modprobe.d/atropos-nyx.conf`, reloads the KVM modules wi
 Package the local WordPress tree and database, then create a checksummed Ubuntu 24.04 cloud-image guest and install MariaDB and the Atropos runtime:
 
 ```sh
-scripts/atropos.sh package-guest --src ../wordpress --php-output ~/.nyx/guest --fuzzer-output ~/.nyx
-scripts/atropos.sh create-vm --fuzzer-output ~/.nyx
+NYX_HOME=~/.nyx scripts/atropos.sh package-guest --src ../wordpress --php-output ~/.nyx/guest
+NYX_HOME=~/.nyx scripts/atropos.sh create-vm
 ```
 
 `create-nyx-vm.sh` uses standard QEMU under TCG, `cloud-init`, and a temporary user-mode network connection to provision the guest so disk writes persist. The Nyx-specific QEMU binary is used for KVM pre-snapshot creation and fuzzing. The provisioning boot does not require KVM. On the first KVM-Nyx boot, guest services initialize MariaDB, import the WordPress database, and start the PHP CLI worker. The worker warms OPcache, flushes permalinks through a child process, and waits before loading WordPress. The agent takes its Nyx snapshot at that idle point. The pre-snapshot service detects the Nyx CPU, disables itself in the snapshot state, and issues `HYPERCALL_KAFL_LOCK`. The script writes LibAFL's `config.ron` and `default_config.ron` after the pre-snapshot is available.
 
 The checkpoint is for single-site WordPress with no early-loading content drop-ins. Packaging stops if `wp-config.php` reads request superglobals, multisite is enabled, or `advanced-cache.php`, `db.php`, `object-cache.php`, `maintenance.php`, or `sunrise.php` is present, since those can consume request values before the checkpoint.
 
-Large images, snapshots, and the local database bundle stay under `--fuzzer-output` (default `~/.nyx`). Guest PHP files stay under `--php-output` (default `<fuzzer-output>/guest`). These local files contain the WordPress database and its credentials and are created with user-only permissions.
+Large images, snapshots, and the local database bundle stay under `NYX_HOME` (default `~/.nyx`). Guest PHP files stay under `--php-output` (default `$NYX_HOME/guest`). These local files contain the WordPress database and its credentials and are created with user-only permissions.
 
-If provisioning is interrupted, rerun `scripts/atropos.sh create-vm --fuzzer-output ~/.nyx`. It resumes from the local image. When the packaged guest bundle changes, it reruns cloud-init on the existing disk and moves the old pre-snapshot aside before creating a fresh one; previous pre-snapshot files are retained with a `.before-bundle-*` suffix.
+If provisioning is interrupted, rerun `NYX_HOME=~/.nyx scripts/atropos.sh create-vm`. It resumes from the local image. When the packaged guest bundle changes, it reruns cloud-init on the existing disk and moves the old pre-snapshot aside before creating a fresh one; previous pre-snapshot files are retained with a `.before-bundle-*` suffix.
 
 ## Run
 
 ```sh
-ATROPOS_NYX_ITERS=1000 scripts/atropos.sh run --fuzzer-output ~/.nyx
+NYX_HOME=~/.nyx ATROPOS_NYX_ITERS=1000 scripts/atropos.sh run
 ```
 
 The Rust binary is `target/nyx/atropos-libafl`. At startup it checks for `config.ron`, loads the VM image and pre-snapshot through LibAFL Nyx, and, when the corpus directory is empty, loads one seed per JSON file from `--seed-dir`. It then fuzzes through `NyxExecutor`.
@@ -77,8 +77,8 @@ Fuzzer flags, parsed by the binary:
 
 | Flag | Default | Purpose |
 | --- | --- | --- |
-| `--nyx-share` | `<fuzzer-output>/phase-run/share-oracle` | Nyx config and snapshot references |
-| `--nyx-workdir` | `<fuzzer-output>/workdir` | QEMU-Nyx work and guest dumps |
+| `--nyx-share` | `$NYX_HOME/phase-run/share-oracle` | Nyx config and snapshot references |
+| `--nyx-workdir` | `$NYX_HOME/workdir` | QEMU-Nyx work and guest dumps |
 | `--timeout-secs` | `2` | Per-input execution timeout, from 0 to 255 seconds |
 | `--seed-dir` | unset | Directory of seed JSON files, one seed per file. Required when the corpus directory is empty |
 | `--corpus-dir` | `./corpus` | Fuzzing corpus directory |
@@ -90,8 +90,8 @@ Useful environment variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `--fuzzer-output` | `~/.nyx` | Root directory for Nyx VM, snapshot, bundle, share, and workdir |
-| `--php-output` | `<fuzzer-output>/guest` | PHP guest artifacts and `<php-output>/prefix` install |
+| `NYX_HOME` | `~/.nyx` | Root directory for Nyx VM, snapshot, bundle, share, and workdir |
+| `--php-output` | `$NYX_HOME/guest` | PHP guest artifacts and `<php-output>/prefix` install |
 | `--src` | `../wordpress` | PHP application source tree |
 | `--app` | `wordpress` | `package-guest` adapter: `wordpress` or `generic` |
 | `ATROPOS_NYX_CPU` | `0` | Nyx worker ID |
@@ -108,7 +108,7 @@ Pass `--seed-dir` as a directory of JSON files when the corpus directory is empt
 For a short smoke run after building the guest:
 
 ```sh
-ATROPOS_NYX_ITERS=20 scripts/atropos.sh run --fuzzer-output ~/.nyx
+NYX_HOME=~/.nyx ATROPOS_NYX_ITERS=20 scripts/atropos.sh run
 ```
 
 ## Troubleshooting
@@ -116,5 +116,5 @@ ATROPOS_NYX_ITERS=20 scripts/atropos.sh run --fuzzer-output ~/.nyx
 - **Missing `config.ron`, disk image, or snapshot:** run the corresponding build/package step above. `scripts/prepare-nyx-share.sh` validates the VM artifacts and writes the LibAFL Nyx configuration.
 - **`enable_vmware_backdoor` is `N`:** run `sudo scripts/enable-kvm-nyx.sh`; verify `/sys/module/kvm/parameters/enable_vmware_backdoor` prints `Y` and the current user can access `/dev/kvm`.
 - **Nyx QEMU cannot start:** check `/dev/kvm`, the KVM module parameter, and the paths in the `--nyx-share` directory's `default_config.ron`.
-- **Guest provision timeout:** inspect `$ATROPOS_NYX_DATA_DIR/vm/preimage-serial.log` for snapshot boot failures and the QEMU serial output from cloud-init provisioning.
+- **Guest provision timeout:** inspect `$NYX_HOME/vm/preimage-serial.log` for snapshot boot failures and the QEMU serial output from cloud-init provisioning.
 - **Change the WordPress source or local database:** rerun `scripts/atropos.sh package-guest`, then `scripts/atropos.sh create-vm`.

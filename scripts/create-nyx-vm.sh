@@ -9,23 +9,13 @@ if [[ "${ATROPOS_NYX_BUILD_SHELL:-0}" != 1 ]]; then
 	exec "$SCRIPT_DIR/with-nyx-build-deps.sh" "$0" "$@"
 fi
 
-DATA_DIR=""
-while [[ $# -gt 0 ]]; do
-	case "$1" in
-	--fuzzer-output)
-		DATA_DIR="${2:?--fuzzer-output needs a directory}"
-		shift 2
-		;;
-	*)
-		printf 'unknown argument: %s\n' "$1" >&2
-		exit 1
-		;;
-	esac
-done
-if [[ -z "$DATA_DIR" ]]; then
-	printf 'usage: create-nyx-vm.sh --fuzzer-output DIR\n' >&2
+if [[ $# -gt 0 ]]; then
+	printf 'unknown argument: %s\n' "$1" >&2
 	exit 1
 fi
+: "${NYX_HOME:=${HOME:?HOME must be set}/.nyx}"
+export NYX_HOME
+DATA_DIR="$NYX_HOME"
 VM_DIR="$DATA_DIR/vm"
 BASE_IMAGE="$VM_DIR/noble-server-cloudimg-amd64.img"
 VM_IMAGE="$VM_DIR/atropos-nyx.qcow2"
@@ -209,5 +199,5 @@ else
 	chmod 600 "$VM_DIR/preimage-complete"
 fi
 
-"$SCRIPT_DIR/prepare-nyx-share.sh" --fuzzer-output "$DATA_DIR"
+NYX_HOME="$DATA_DIR" "$SCRIPT_DIR/prepare-nyx-share.sh"
 printf '\nNyx VM and share configuration are ready. Run scripts/run-fuzzer.sh to start fuzzing.\n'

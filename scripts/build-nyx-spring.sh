@@ -4,15 +4,10 @@ export LC_ALL=C
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
-FUZZER_OUTPUT=""
 SPRINGFUZZ_ROOT=""
 WEBGOAT_JAR=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--fuzzer-output)
-		FUZZER_OUTPUT="${2:?--fuzzer-output needs a directory}"
-		shift 2
-		;;
 	--springfuzz-src)
 		SPRINGFUZZ_ROOT="${2:?--springfuzz-src needs a directory}"
 		shift 2
@@ -27,11 +22,14 @@ while [[ $# -gt 0 ]]; do
 		;;
 	esac
 done
-if [[ -z "$FUZZER_OUTPUT" || -z "$SPRINGFUZZ_ROOT" ]]; then
-	printf 'usage: build-nyx-spring.sh --fuzzer-output DIR --springfuzz-src DIR [--webgoat-jar FILE]\n' >&2
+: "${NYX_HOME:=${HOME:?HOME must be set}/.nyx}"
+export NYX_HOME
+if [[ -z "$SPRINGFUZZ_ROOT" ]]; then
+	printf 'usage: build-nyx-spring.sh --springfuzz-src DIR [--webgoat-jar FILE]\n' >&2
+	printf 'NYX_HOME selects the Nyx data directory (default: ~/.nyx)\n' >&2
 	exit 1
 fi
-DATA_DIR="$FUZZER_OUTPUT/spring"
+DATA_DIR="$NYX_HOME/spring"
 GUEST_DIR="$DATA_DIR/guest"
 BUILD_ROOT="${ATROPOS_SPRING_BUILD_ROOT:-$(mktemp -d "${TMPDIR:-/tmp}/atropos-spring.XXXXXX")}"
 MAVEN_VERSION="${ATROPOS_MAVEN_VERSION:-3.9.9}"

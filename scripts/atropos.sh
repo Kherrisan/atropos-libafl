@@ -14,10 +14,9 @@ usage: scripts/atropos.sh <command> [options] [source-dir] [-- fuzzer-args]
 commands:
   build --project YAML SOURCE   build the backend, run build_script, and package
   setup --project YAML SOURCE   create the guest VM; the installer runs setup_script
-  fuzz --project YAML SOURCE    run the fuzzer for the project's backend
+  fuzz --project YAML SOURCE [--output DIR]   run the fuzzer for the project's backend
   build-fuzzer
   build-php
-  setup-wordpress
   package-guest
   create-vm
   run
@@ -35,13 +34,16 @@ options:
   --src DIR             application source tree for the PHP commands (default: ../wordpress)
   --app NAME            PHP app adapter: wordpress or generic (default: wordpress)
   --db-env FILE         Database credential file for package-guest
-  --php-output DIR      PHP guest artifacts and install prefix (default: <fuzzer-output>/guest)
+  --php-output DIR      PHP guest artifacts and install prefix (default: $NYX_HOME/guest)
   --php-src DIR         PHP 7.4 source tree (default: guest/php/php-7.4-patched)
   --pcov-src DIR        PCOV source tree (default: guest/php/pcov-patched)
   --springfuzz-src DIR  SpringFuzz source tree (default: SpringFuzz submodule)
-  --fuzzer-output DIR   Nyx images, bundle, share, and workdir (default: ~/.nyx)
+  --output DIR          parent of the fuzz run directory (default: output/)
   --target php|spring   guest selected by run (default: php; fuzz uses project.yaml)
   --cpu-set LIST        CPU list for run (default: the built-in set)
+
+NYX_HOME is the Nyx data directory (default: ~/.nyx). It holds images, the
+guest bundle, share, and the QEMU workdir.
 EOF
 }
 
@@ -61,7 +63,7 @@ PHP_OUTPUT=""
 PHP_SRC=""
 PCOV_SRC=""
 SPRINGFUZZ_SRC=""
-FUZZER_OUTPUT=""
+OUTPUT=""
 TARGET="php"
 CPU_SET=""
 leading=()
@@ -102,8 +104,8 @@ while [[ $# -gt 0 ]]; do
 		SPRINGFUZZ_SRC="${2:?--springfuzz-src needs a directory}"
 		shift 2
 		;;
-	--fuzzer-output)
-		FUZZER_OUTPUT="${2:?--fuzzer-output needs a directory}"
+	--output)
+		OUTPUT="${2:?--output needs a directory}"
 		shift 2
 		;;
 	--target)
@@ -133,8 +135,13 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-FUZZER_OUTPUT="${FUZZER_OUTPUT:-${HOME:?HOME must be set}/.nyx}"
-PHP_OUTPUT="${PHP_OUTPUT:-$FUZZER_OUTPUT/guest}"
+: "${NYX_HOME:=${HOME:?HOME must be set}/.nyx}"
+export NYX_HOME
+if [[ -n "$OUTPUT" && "$command" != fuzz && "$command" != run ]]; then
+	printf -- '--output is only valid for fuzz and run\n' >&2
+	exit 1
+fi
+PHP_OUTPUT="${PHP_OUTPUT:-$NYX_HOME/guest}"
 PHP_SRC="${PHP_SRC:-$REPO_ROOT/guest/php/php-7.4-patched}"
 PCOV_SRC="${PCOV_SRC:-$REPO_ROOT/guest/php/pcov-patched}"
 SPRINGFUZZ_SRC="${SPRINGFUZZ_SRC:-$REPO_ROOT/SpringFuzz}"
@@ -192,7 +199,7 @@ load_project() {
 }
 
 project_work_dir() {
-	printf '%s\n' "$FUZZER_OUTPUT/projects/$PROJECT_NAME"
+	printf '%s\n' "$NYX_HOME/projects/$PROJECT_NAME"
 }
 
 php_backend_ready() {
@@ -202,16 +209,16 @@ php_backend_ready() {
 }
 
 spring_backend_ready() {
-	local guest="$FUZZER_OUTPUT/spring/guest"
+	local guest="$NYX_HOME/spring/guest"
 	[[ -f "$guest/webgoat.jar" && -x "$guest/atropos_spring_agent" ]] || return 1
 	[[ "$(cat "$guest/spring-runtime" 2>/dev/null || true)" == spring-nyx-webgoat-2023.8 ]]
 }
 
 package_ready() {
 	if [[ "$PROJECT_BACKEND" == spring ]]; then
-		[[ -f "$FUZZER_OUTPUT/spring/bundle/guest-bundle.tar.gz" ]]
+		[[ -f "$NYX_HOME/spring/bundle/guest-bundle.tar.gz" ]]
 	else
-		[[ -f "$FUZZER_OUTPUT/bundle/guest-bundle.tar.gz" ]]
+		[[ -f "$NYX_HOME/bundle/guest-bundle.tar.gz" ]]
 	fi
 }
 
@@ -222,7 +229,7 @@ project_package() {
 	export PROJECT_OUT="$work/out"
 	mkdir -p "$PROJECT_OUT"
 	if [[ "$PROJECT_BACKEND" == spring ]]; then
-		"$SCRIPT_DIR/package-nyx-spring-guest.sh" --fuzzer-output "$FUZZER_OUTPUT"
+		"$SCRIPT_DIR/package-nyx-spring-guest.sh"
 		return
 	fi
 	local app="generic"
@@ -232,7 +239,6 @@ project_package() {
 	local args=(
 		--src "$SRC"
 		--php-output "$PHP_OUTPUT"
-		--fuzzer-output "$FUZZER_OUTPUT"
 		--app "$app"
 	)
 	if [[ -n "$DB_ENV" ]]; then
@@ -273,7 +279,6 @@ project_build() {
 			exit 1
 		fi
 		"$SCRIPT_DIR/build-nyx-spring.sh" \
-			--fuzzer-output "$FUZZER_OUTPUT" \
 			--springfuzz-src "$SPRINGFUZZ_SRC" \
 			--webgoat-jar "$work/out/webgoat.jar"
 	else
@@ -299,9 +304,9 @@ project_setup() {
 		exit 1
 	fi
 	if [[ "$PROJECT_BACKEND" == spring ]]; then
-		"$SCRIPT_DIR/create-nyx-spring-vm.sh" --fuzzer-output "$FUZZER_OUTPUT"
+		"$SCRIPT_DIR/create-nyx-spring-vm.sh"
 	else
-		"$SCRIPT_DIR/create-nyx-vm.sh" --fuzzer-output "$FUZZER_OUTPUT"
+		"$SCRIPT_DIR/create-nyx-vm.sh"
 	fi
 }
 
@@ -309,7 +314,10 @@ project_fuzz() {
 	reject_unknown_project_args 1
 	load_project
 	TARGET="$PROJECT_BACKEND"
-	local args=(--fuzzer-output "$FUZZER_OUTPUT" --target "$TARGET")
+	local args=(--target "$TARGET")
+	if [[ -n "$OUTPUT" ]]; then
+		args+=(--output "$OUTPUT")
+	fi
 	if [[ -n "$CPU_SET" ]]; then
 		args+=(--cpu-set "$CPU_SET")
 	fi
@@ -357,14 +365,10 @@ build-php)
 	fi
 	exec "$SCRIPT_DIR/build-nyx-php.sh" "${args[@]}"
 	;;
-setup-wordpress)
-	exec "$SCRIPT_DIR/setup-wordpress.sh" --src "$SRC" --php-output "$PHP_OUTPUT"
-	;;
 package-guest)
 	args=(
 		--src "$SRC"
 		--php-output "$PHP_OUTPUT"
-		--fuzzer-output "$FUZZER_OUTPUT"
 		--app "$APP"
 	)
 	if [[ -n "$DB_ENV" ]]; then
@@ -373,23 +377,26 @@ package-guest)
 	exec "$SCRIPT_DIR/package-nyx-guest.sh" "${args[@]}"
 	;;
 create-vm)
-	exec "$SCRIPT_DIR/create-nyx-vm.sh" --fuzzer-output "$FUZZER_OUTPUT"
+	exec "$SCRIPT_DIR/create-nyx-vm.sh"
 	;;
 run)
-	args=(--fuzzer-output "$FUZZER_OUTPUT" --target "$TARGET")
+	args=(--target "$TARGET")
+	if [[ -n "$OUTPUT" ]]; then
+		args+=(--output "$OUTPUT")
+	fi
 	if [[ -n "$CPU_SET" ]]; then
 		args+=(--cpu-set "$CPU_SET")
 	fi
 	exec "$SCRIPT_DIR/run-fuzzer.sh" "${args[@]}" "${leading[@]}" "${fuzzer_args[@]}"
 	;;
 build-spring)
-	exec "$SCRIPT_DIR/build-nyx-spring.sh" --fuzzer-output "$FUZZER_OUTPUT" --springfuzz-src "$SPRINGFUZZ_SRC"
+	exec "$SCRIPT_DIR/build-nyx-spring.sh" --springfuzz-src "$SPRINGFUZZ_SRC"
 	;;
 package-spring)
-	exec "$SCRIPT_DIR/package-nyx-spring-guest.sh" --fuzzer-output "$FUZZER_OUTPUT"
+	exec "$SCRIPT_DIR/package-nyx-spring-guest.sh"
 	;;
 create-spring-vm)
-	exec "$SCRIPT_DIR/create-nyx-spring-vm.sh" --fuzzer-output "$FUZZER_OUTPUT"
+	exec "$SCRIPT_DIR/create-nyx-spring-vm.sh"
 	;;
 *)
 	printf 'unknown command: %s\n' "$command" >&2

@@ -1,7 +1,8 @@
 use std::{env, path::PathBuf};
 
 fn nyx_data_dir() -> PathBuf {
-    env::var_os("ATROPOS_NYX_DATA_DIR")
+    env::var_os("NYX_HOME")
+        .or_else(|| env::var_os("ATROPOS_NYX_DATA_DIR"))
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".nyx")))
         .unwrap_or_else(|| env::temp_dir().join("atropos-libafl-nyx"))

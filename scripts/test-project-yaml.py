@@ -16,13 +16,17 @@ PHP_MARKER = "php-code-coverage-9.2.31+phpcov-8.2.1+fastcgi-v1"
 AGENT_MARKER = "nyx-agent-fastcgi-v1"
 
 
-def run(args, check=True):
+def run(args, check=True, env=None):
+    merged = os.environ.copy()
+    if env:
+        merged.update(env)
     result = subprocess.run(
         args,
         cwd=REPO,
         text=True,
         capture_output=True,
         check=False,
+        env=merged,
     )
     if check and result.returncode != 0:
         raise AssertionError(
@@ -233,8 +237,6 @@ class ProjectYamlTest(unittest.TestCase):
                     "build",
                     "--project",
                     str(root / "project.yaml"),
-                    "--fuzzer-output",
-                    str(output),
                     "--php-output",
                     str(php),
                     "--php-src",
@@ -242,7 +244,8 @@ class ProjectYamlTest(unittest.TestCase):
                     "--pcov-src",
                     str(Path(temporary) / "missing-pcov"),
                     str(source),
-                ]
+                ],
+                env={"NYX_HOME": str(output)},
             )
             self.assertIn("skipping build for sample", result.stdout)
             self.assertFalse((stamp_dir / "out" / "ran").exists())
@@ -267,11 +270,10 @@ class ProjectYamlTest(unittest.TestCase):
                     "bash",
                     str(ATROPOS),
                     "setup",
-                    "--fuzzer-output",
-                    str(output),
                     str(root),
                 ],
                 check=False,
+                env={"NYX_HOME": str(output)},
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("guest bundle is missing", result.stderr)
@@ -298,14 +300,61 @@ class ProjectYamlTest(unittest.TestCase):
                     "setup",
                     "--project",
                     str(root),
-                    "--fuzzer-output",
-                    str(output),
                 ],
                 check=False,
+                env={"NYX_HOME": str(output)},
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("guest bundle is missing", result.stderr)
             self.assertIn(str(root / "project.yaml"), result.stderr)
+
+    def test_output_flag_belongs_to_fuzz(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "sample"
+            nyx = Path(temporary) / "nyx"
+            write_project(
+                root,
+                """
+                name: sample
+                language: php
+                main_repo: https://example.invalid/sample
+                backend: php
+                build_script: build.sh
+                setup_script: setup.sh
+                """,
+            )
+            rejected = run(
+                [
+                    "bash",
+                    str(ATROPOS),
+                    "build",
+                    "--output",
+                    str(Path(temporary) / "run"),
+                    "--project",
+                    str(root / "project.yaml"),
+                    str(root),
+                ],
+                check=False,
+                env={"NYX_HOME": str(nyx)},
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("--output is only valid for fuzz and run", rejected.stderr)
+            accepted = run(
+                [
+                    "bash",
+                    str(ATROPOS),
+                    "fuzz",
+                    "--output",
+                    str(Path(temporary) / "run"),
+                    "--project",
+                    str(Path(temporary) / "missing.yaml"),
+                ],
+                check=False,
+                env={"NYX_HOME": str(nyx)},
+            )
+            self.assertNotEqual(accepted.returncode, 0)
+            self.assertNotIn("does not take extra arguments", accepted.stderr)
+            self.assertIn("project.yaml", accepted.stderr)
 
     def test_webgoat_build_script_copies_a_local_jar(self):
         with tempfile.TemporaryDirectory() as temporary:

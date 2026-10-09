@@ -1,6 +1,5 @@
-# Generic PHP request-parameter patterns. No function names: any PHP file
-# passed to scripts/build-batch-dictionary.py is scanned. Dynamic values such
-# as get_post_stati() are not literals, so they are not extracted.
+# Generic PHP request-parameter patterns. No function names. Dynamic values
+# such as get_post_stati() are not literals, so they are not extracted.
 rules:
   - id: php-request-enum
     languages: [php]

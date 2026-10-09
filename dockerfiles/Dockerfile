@@ -5,34 +5,39 @@
 #
 #   docker build -f atropos-libafl/dockerfiles/Dockerfile -t atropos-libafl .
 #
-# The image builds the fuzzer, the PHP guest runtime, and the Spring guest
-# runtime. The first container
-# start packages that runtime with the WordPress tree and creates the Ubuntu
-# disk. MariaDB installation, database initialization, and wp_install run
-# inside that guest during cloud-init. The disk and Nyx pre-snapshot need
+# The image builds the fuzzer, then runs scripts/atropos.sh build for the
+# WordPress and WebGoat project.yaml files. That compiles the matching
+# backend, runs the project's build_script, and packs the guest bundle.
+# The first container start runs setup for the selected project, which creates
+# the Ubuntu disk. Database installation and application setup run inside that
+# guest through the project's setup_script. The disk and Nyx pre-snapshot need
 # /dev/kvm and are stored under /var/lib/atropos/nyx.
 #
 # Do not reload the host KVM module from a container. The host must already
 # have enable_vmware_backdoor=Y. Reloading KVM stops every other instance.
 #
 # One container is one QEMU worker. Share the Nyx data volume, and give each
-# instance its own CPU id and CPU set:
+# instance its own CPU id and CPU set. ATROPOS_PROJECT selects wordpress
+# (the default) or webgoat. A different program uses ATROPOS_PROJECT_YAML and,
+# when its source tree is not the yaml directory, ATROPOS_SOURCE.
 #
 #   docker run --device /dev/kvm --group-add kvm \
+#     -e ATROPOS_PROJECT=wordpress \
 #     -e ATROPOS_NYX_CPU=0 -e ATROPOS_NYX_CPUSET=2-5 \
 #     -v atropos-nyx:/var/lib/atropos/nyx \
 #     atropos-libafl
 #
 # The first container must be able to write the volume. Later containers can
 # mount the same snapshot. Pass fuzzer arguments after the image name; they
-# are forwarded to scripts/atropos.sh run.
+# are forwarded to scripts/atropos.sh fuzz. Seeds come from the project.yaml
+# seeds directory.
 
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     LC_ALL=C \
-    ATROPOS_NYX_DATA_DIR=/var/lib/atropos/nyx \
+    NYX_HOME=/var/lib/atropos/nyx \
     PATH=/root/.cargo/bin:/root/.nix-profile/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -85,11 +90,12 @@ RUN if [ ! -f SpringFuzz/pom.xml ]; then \
 RUN chmod 0755 dockerfiles/entrypoint.sh scripts/*.sh \
     && mkdir -p /var/lib/atropos/nyx \
     && bash scripts/atropos.sh build-fuzzer \
-    && bash scripts/atropos.sh build-php \
+    && bash scripts/atropos.sh build \
+        --project /opt/atropos-libafl/projects/wordpress/project.yaml \
         --php-output /var/lib/atropos/nyx/guest \
-        --fuzzer-output /var/lib/atropos/nyx \
-    && bash scripts/atropos.sh build-spring \
-        --springfuzz-src /opt/atropos-libafl/SpringFuzz \
-        --fuzzer-output /var/lib/atropos/nyx
+        /opt/wordpress \
+    && bash scripts/atropos.sh build \
+        --project /opt/atropos-libafl/projects/webgoat/project.yaml \
+        --springfuzz-src /opt/atropos-libafl/SpringFuzz
 
 ENTRYPOINT ["/opt/atropos-libafl/dockerfiles/entrypoint.sh"]

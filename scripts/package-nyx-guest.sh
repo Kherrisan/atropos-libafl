@@ -9,15 +9,10 @@ if [[ "${ATROPOS_NYX_BUILD_SHELL:-0}" != 1 ]]; then
 	exec "$SCRIPT_DIR/with-nyx-build-deps.sh" "$0" "$@"
 fi
 
-DATA_DIR=""
 PHP_OUTPUT=""
 SRC=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
-	--fuzzer-output)
-		DATA_DIR="${2:?--fuzzer-output needs a directory}"
-		shift 2
-		;;
 	--php-output)
 		PHP_OUTPUT="${2:?--php-output needs a directory}"
 		shift 2
@@ -45,8 +40,12 @@ if [[ "$APP" != wordpress && "$APP" != generic ]]; then
 	printf 'unknown app %s; use wordpress or generic\n' "$APP" >&2
 	exit 1
 fi
-if [[ -z "$DATA_DIR" || -z "$PHP_OUTPUT" || -z "$SRC" ]]; then
-	printf 'usage: package-nyx-guest.sh --src DIR --php-output DIR --fuzzer-output DIR [--app wordpress|generic] [--db-env FILE]\n' >&2
+: "${NYX_HOME:=${HOME:?HOME must be set}/.nyx}"
+export NYX_HOME
+DATA_DIR="$NYX_HOME"
+if [[ -z "$PHP_OUTPUT" || -z "$SRC" ]]; then
+	printf 'usage: package-nyx-guest.sh --src DIR --php-output DIR [--app wordpress|generic] [--db-env FILE]\n' >&2
+	printf 'NYX_HOME selects the Nyx data directory (default: ~/.nyx)\n' >&2
 	exit 1
 fi
 ARTIFACT_DIR="$PHP_OUTPUT"
